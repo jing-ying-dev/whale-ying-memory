@@ -21,7 +21,9 @@
 
 | 任务 | Engram-Memory | 论文/基线对照 |
 |---|---|---|
-| 单跳 262k（substring） | **93.2%**（5 次均值） | GPT-4o 60 · BM25 56 · gpt-4o-mini 45 |
+| 单跳 262k（substring） | **93.2%**（gpt-4o-mini 作答，5 次均值） | GPT-4o 60 · BM25 56 · gpt-4o-mini 45 |
+| 单跳 262k（substring） | **93.0%**（DeepSeek 作答、关思考，单次） | — |
+| 单跳 262k（substring） | **92.0%**（本地 Qwen2.5-Coder 7B 作答，单次） | — |
 | 单跳 6k | **98%** | — |
 | 多跳 262k（substring） | **48.3%**（deepseek 作答，3 次均值） | 论文多跳全部 ≤6% |
 | 多跳 262k（gpt-4o-mini 作答） | **25.3%**（3 次均值） | — |
