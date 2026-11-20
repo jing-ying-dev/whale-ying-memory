@@ -73,7 +73,7 @@ flowchart LR
 
 For implementation details and terminology, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
-**Model configuration.** Thinking is disabled across the whole pipeline: extraction uses DeepSeek-flash with `disable_thinking=True`; reranking uses DeepSeek at temperature 0 with thinking disabled; answering disables thinking for DeepSeek models (gpt-4o-mini runs use temperature 0.7, which has no thinking toggle).
+**Model configuration.** Extraction uses DeepSeek-flash; reranking uses DeepSeek at temperature 0 with thinking disabled; answering disables thinking for DeepSeek models (gpt-4o-mini runs use temperature 0.7, which has no thinking toggle). The current extractor disables DeepSeek-flash thinking (it otherwise consumes `max_tokens` with its default thinking stream); extraction-thinking ablation is reported in Ablations.
 
 ## Benchmark results
 
@@ -91,10 +91,10 @@ All results below use the current system: four-table extraction, supersession/fo
 
 ### Memory system vs. direct full-context reading
 
-| Task at 262k | Direct | With WhaleYing | Gain |
+| Task at 262k | Direct full context | With WhaleYing | Gain |
 |---|---:|---:|---:|
-| Single-hop | 64% | **93.2%** | **+29pp** |
-| Multi-hop | 5.3% | **48.3%** | **+43pp** |
+| Single-hop | 64% — DeepSeek | **93.2% — gpt-4o-mini** | **+29pp** |
+| Multi-hop | 5.3% — DeepSeek | **48.3% — DeepSeek** | **+43pp** |
 
 At 6k context, WhaleYing scored **98% single-hop** and **66% multi-hop substring match** (65% exact), both with DeepSeek and thinking disabled.
 
@@ -108,11 +108,11 @@ The headline gains decompose into a few measured effects:
 |---|---|
 | Memory system on/off (262k) | Single-hop 64% → 93.2% (+29pp); multi-hop 5.3% → 48.3% (+43pp) |
 | Self-Ask iteration on/off (mh_6k) | 27% → 66% (+39pp) |
-| Answer model (single-hop 262k) | gpt-4o-mini 93.2% ≈ DeepSeek 93.0% ≈ Qwen2.5-Coder 7B 92.0% (model-independent) |
+| Answer model (single-hop 262k) | gpt-4o-mini 93.2% ≈ DeepSeek 93.0% ≈ Qwen2.5-Coder 7B 92.0% (stable across the three tested answer models) |
 | Answer model (multi-hop 262k) | DeepSeek 48.3% vs gpt-4o-mini 25.3% (model-dependent) |
 | Folding on/off (LoCoMo) | 38.6% (no folding) vs 36.3% (folding); see LoCoMo below |
 
-Thinking mode was also ablated (DeepSeek, 262k single-hop): disabling thinking for reranking and answering cost nothing, and disabling it for extraction cost −1~3pp (90–92% vs 93%), which was re-tested and fell inside the temperature-0.7 single-run noise band. The +29pp gain therefore comes from the deterministic architecture, not from model thinking.
+Thinking mode was ablated on DeepSeek 262k single-hop. With reranking and answering thinking disabled, disabling extraction thinking as well measured 90.0% on the first run and 92% on a re-test, versus 93.0% with extraction thinking on — a −1~3pp swing inside the temperature-0.7 single-run noise band, so thinking mode was not a measurable contributor at these settings. The single-hop 93.2% headline (gpt-4o-mini) was measured with extraction thinking on; the current extractor disables thinking, and re-tests put the difference inside noise.
 
 The single-hop 93.2% is the mean of five runs (93/93/93/94/93). One additional run was excluded because a mobile-hotspot connection dropped during store extraction and left the memory store incomplete; re-extraction over a stable connection returned the 93–94% band.
 

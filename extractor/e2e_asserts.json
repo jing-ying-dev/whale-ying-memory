@@ -1,0 +1,42 @@
+{
+  "_task": "task-107 三：字段新增必配端到端断言——从提问到答案，证明字段真被读过（单测不算）",
+  "_rule": "每条 = 一个「只有读了这个字段才会不同」的问句；预期里写了的答案侧字段全部对上才算通。QUERY_FIELD_CONTRACT 里的每个字段都必须至少被一条断言覆盖（extract.py 的 check_e2e_field_coverage 会核对，缺了直接报 schema 错）。",
+  "asserts": [
+    {
+      "id": "e2e-107-value-unit",
+      "chunk": "chunk-en-worklog-01",
+      "题面": "throughput 是多少？（值和单位都要）",
+      "指标名": "throughput",
+      "查法": "max",
+      "预期": {"值": 37, "单位": "req/s"},
+      "证明字段": ["值", "单位"]
+    },
+    {
+      "id": "e2e-107-precision",
+      "chunk": "chunk-en-worklog-01",
+      "题面": "throughput 那行的原文时间精度是到哪一级？（只有读了 time_precision 才答得出：原文是 about a quarter past eight，解不出，精度是 unknown，不是 day）",
+      "指标名": "throughput",
+      "查法": "max",
+      "预期": {"值": 37, "单位": "req/s", "精度": "unknown"},
+      "证明字段": ["精度"]
+    },
+    {
+      "id": "e2e-107-time-norm-uncertain",
+      "chunk": "chunk-en-worklog-01",
+      "题面": "throughput 这条记录的时间解成绝对时刻了吗？解不出要说不确定。（只有读了 time_norm + time_uncertain 才答得出：null + true）",
+      "指标名": "throughput",
+      "查法": "max",
+      "预期": {"值": 37, "单位": "req/s", "time_norm": null, "time_uncertain": true},
+      "证明字段": ["time_norm", "time_uncertain"]
+    },
+    {
+      "id": "e2e-107-source",
+      "chunk": "chunk-en-worklog-01",
+      "题面": "这个 throughput 答案来自哪一片原文？（答案必须带来源）",
+      "指标名": "throughput",
+      "查法": "max",
+      "预期": {"值": 37, "单位": "req/s", "来源": "chunk-en-worklog-01"},
+      "证明字段": ["来源"]
+    }
+  ]
+}
