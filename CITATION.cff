@@ -7,7 +7,7 @@ authors:
     orcid: https://orcid.org/0009-0006-3315-7073
 version: 0.1.0
 doi: 10.5281/zenodo.24402955
-date-released: 2026-11-21
+date-released: 2026-11-20
 repository-code: "https://github.com/jing-ying-dev/whale-ying-memory"
 license: Apache-2.0
 abstract: "WhaleYing Memory is a long-term memory system for AI agents. It extracts facts, events, metrics, and identities from conversations and long documents, resolves superseded values through supersession chains and folding, retrieves current evidence with hybrid search, and supplies that evidence to an LLM for answering."
