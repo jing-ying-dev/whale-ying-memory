@@ -1,33 +1,96 @@
-# WhaleYing Memory
+<div align="center">
 
-**Structured long-term memory for AI agents, built on DeepSeek — with conflict resolution and multi-hop retrieval.**
+# 🐋 WhaleYing Memory
 
-WhaleYing extracts facts, events, metrics, and identities from conversations or long documents. It tracks updates through supersession chains, retrieves current evidence with hybrid search, and supplies that evidence to an LLM for answering.
+### Structured long-term memory for AI agents
 
-The name: **Whale** is DeepSeek's mascot (the system is built on the DeepSeek API) and evokes deep, long-term memory; **Ying** is the author's name.
+**Extract facts. Resolve updates. Retrieve evidence. Answer across long histories.**
 
-The system is designed for questions where long-context inputs contain conflicting versions of a fact or require multiple retrieval steps.
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.10%2B-3776AB.svg?logo=python&logoColor=white)](#quick-start)
+[![Built with DeepSeek](https://img.shields.io/badge/built%20with-DeepSeek-4D6BFE.svg)](https://platform.deepseek.com/)
+[![MemoryAgentBench](https://img.shields.io/badge/MemoryAgentBench-262k-orange.svg)](#benchmark-results)
 
-## Results
+**93.2% single-hop** · **48.3% multi-hop** on MemoryAgentBench Conflict_Resolution at 262k context
 
-The following results are for the current system: four-table extraction, temporal supersession and folding, hybrid retrieval, and Self-Ask-style iteration. Conflict-resolution scores use **MemoryAgentBench · Conflict_Resolution**.
+</div>
 
-| Task | WhaleYing | Reported comparison |
-|---|---:|---|
-| Single-hop, 262k, substring scoring | **93.2%** (gpt-4o-mini answer model; mean of 5 runs) | GPT-4o: 60%; BM25: 56%; gpt-4o-mini: 45% |
-| Single-hop, 262k, substring scoring | **93.0%** (DeepSeek answer model, thinking disabled; single run) | — |
-| Single-hop, 262k, substring scoring | **92.0%** (local Qwen2.5-Coder 7B answer model; single run) | — |
-| Single-hop, 6k, substring scoring | **98%** (DeepSeek answer model, thinking disabled; single run) | — |
-| Multi-hop, 262k, substring scoring | **48.3%** (DeepSeek answer model, thinking disabled; mean of 3 runs) | Paper’s BM25 3% · HippoRAG-v2 5% · Mem0 2% · MemGPT 3% · CAR (gpt-4o) 41% |
-| Multi-hop, 262k | **25.3%** (gpt-4o-mini answer model; mean of 3 runs) | — |
-| Multi-hop, 262k, direct full-context reading | — | DeepSeek without the memory system: 5.3% |
-| Multi-hop, 6k, substring scoring | **66%** (65% exact; DeepSeek answer model, thinking disabled; single run) | — |
+WhaleYing Memory turns conversations and long documents into a structured memory store. Instead of treating every retrieved chunk as equally current, it tracks which facts supersede older versions, folds memory to the latest state, retrieves evidence with hybrid search, and passes that evidence to an answer model.
 
-For the reported 262k comparisons, single-hop performance rose from 64% direct to 93.2% with memory; multi-hop rose from 5.3% direct to 48.3% with memory. Single-hop accuracy is stable across answer models — gpt-4o-mini (93.2%), DeepSeek with thinking disabled (93.0%), and a local Qwen2.5-Coder 7B (92.0%) all land in the same band. These are benchmark results under the stated configurations, not a guarantee of performance on other workloads. Answer-model temperature was 0.7 for all runs. Single-hop baselines are from MemoryAgentBench (arXiv 2507.05257); the 262k multi-hop baselines (BM25, HippoRAG-v2, Mem0, MemGPT) and CAR are as reported in arXiv 2606.01435.
+It is built for the failure cases that plain long context and ordinary RAG handle poorly: **conflicting fact versions, stale retrieval, and questions that require multiple retrieval hops**.
 
-## LoCoMo results
+## Demo
 
-LoCoMo (long-conversation memory QA) uses the official F1 string-match metric and official QA prompt, with the DeepSeek answer model (temperature 0, thinking disabled). Two configurations are reported — we show both because the default conflict-resolution folding is the wrong tool for this temporal benchmark (see Limitations below):
+<div align="center">
+  <img src="assets/whaleying-demo.gif" alt="WhaleYing Memory answering questions from a 262k memory store" width="960">
+</div>
+
+The demo queries a prebuilt 262k memory store from an agent interface. WhaleYing loads the structured store, retrieves evidence for one or several questions, and sends only the relevant evidence to DeepSeek for answering.
+
+## Why WhaleYing
+
+| Capability | What it changes |
+|---|---|
+| **Structured extraction** | Converts source text into assertions, events, measurements, and identities instead of storing only opaque chunks. |
+| **Supersession chains** | Marks older versions with `invalidated_at`, giving retrieval an explicit notion of what is current. |
+| **Evidence-grounded records** | Deterministic validation requires extracted quotations to be substrings of the source. |
+| **Hybrid retrieval** | Combines multi-field BM25, `all-MiniLM-L6-v2` vectors, and reciprocal rank fusion (RRF). |
+| **Iterative multi-hop answering** | Decomposes a question into subquestions, retrieves each hop, and assembles an evidence chain. |
+| **Answer-model flexibility** | Uses an OpenAI-compatible answer endpoint; tested with DeepSeek, gpt-4o-mini, and a local Qwen2.5-Coder 7B. |
+
+## How it works
+
+```mermaid
+flowchart LR
+    A[Conversation or long document] --> B[Extractor]
+    B --> C[(facts · cards · metrics · identities)]
+    C --> D[Supersession + fold]
+    D --> E[BM25 + vector + RRF]
+    E --> F{Question type}
+    F -->|Single-hop| G[Evidence]
+    F -->|Multi-hop| H[Self-Ask iteration]
+    H --> G
+    G --> I[Answer model]
+```
+
+1. **Extract** — An LLM converts source text into four tables: `facts` for assertions, `cards` for events, `metrics` for measurements, and `identities` for entities. Deterministic gates validate the result and its source quotations.
+2. **Resolve** — Records for the same subject form a supersession chain. Older values are invalidated; folding selects the latest value by sequence.
+3. **Retrieve** — Multi-field BM25 and vector rankings are fused with RRF. Database embeddings are built once and cached; this produced an approximately **1,340× retrieval speedup** in the measured cache test.
+4. **Answer** — Retrieved evidence is passed to an LLM. Optional Self-Ask-style iteration retrieves and composes evidence one hop at a time.
+
+For implementation details and terminology, see [ARCHITECTURE.md](ARCHITECTURE.md).
+
+## Benchmark results
+
+All results below use the current system: four-table extraction, supersession/folding, hybrid retrieval, and optional Self-Ask iteration. The metric is **substring exact match** on **MemoryAgentBench · Conflict_Resolution**.
+
+### 262k context
+
+| Task | WhaleYing | Answer model and runs | Reported comparison |
+|---|---:|---|---|
+| Single-hop | **93.2%** | gpt-4o-mini · mean of 5 runs | GPT-4o 60 · BM25 56 · gpt-4o-mini 45 |
+| Single-hop | **93.0%** | DeepSeek, thinking off · 1 run | — |
+| Single-hop | **92.0%** | local Qwen2.5-Coder 7B · 1 run | — |
+| Multi-hop | **48.3%** | DeepSeek, thinking off · mean of 3 runs | BM25 3 · HippoRAG-v2 5 · Mem0 2 · MemGPT 3 · CAR with gpt-4o 41 |
+| Multi-hop | **25.3%** | gpt-4o-mini · mean of 3 runs | — |
+
+### Memory system vs. direct full-context reading
+
+| Task at 262k | Direct | With WhaleYing | Gain |
+|---|---:|---:|---:|
+| Single-hop | 64% | **93.2%** | **+29pp** |
+| Multi-hop | 5.3% | **48.3%** | **+43pp** |
+
+At 6k context, WhaleYing scored **98% single-hop** and **66% multi-hop substring match** (65% exact), both with DeepSeek and thinking disabled.
+
+The single-hop result remains in the same 92–93% band across a cloud model, DeepSeek, and a local 7B answer model. Multi-hop performance is more dependent on the reasoning ability of the answer model: DeepSeek reached 48.3%, while gpt-4o-mini reached 25.3% under the stated runs. Answer-model temperature was 0.7 for these MemoryAgentBench runs.
+
+Single-hop baselines come from [MemoryAgentBench (arXiv:2507.05257)](https://arxiv.org/abs/2507.05257). Multi-hop baselines and CAR come from [CAR (arXiv:2606.01435)](https://arxiv.org/abs/2606.01435). Raw multi-hop run outputs are included in [`results/`](results/).
+
+<details>
+<summary><strong>LoCoMo results and what they show</strong></summary>
+
+LoCoMo uses the official F1 string-match metric and official QA prompt, with DeepSeek at temperature 0 and thinking disabled.
 
 | LoCoMo task (1,986 questions) | No folding (BM25 only) | Full config (folding + BM25 + vector + RRF) |
 |---|---:|---:|
@@ -38,54 +101,103 @@ LoCoMo (long-conversation memory QA) uses the official F1 string-match metric an
 | Adversarial / abstention | 53.4% | 50.4% |
 | **Overall F1** | **38.6%** | **36.3%** |
 
-## Limitations (stated honestly)
+These results identify a clear task boundary. The current fold is designed to answer **“what is true now?”** by retaining the latest value. LoCoMo often asks **“what happened before?”**, where removing superseded values loses useful history. Relative-time extraction is also the weakest current component at 13.9–15.3% F1. Historical-state retrieval and stronger temporal normalization are therefore direct development targets.
 
-- **LoCoMo is temporal** — its questions ask about the *past* — but the default folding keeps only the latest value of each fact. Folding is the right tool for conflict resolution (MemoryAgentBench FactConsolidation), the wrong tool for "what happened before". That is why the no-folding configuration scores higher on LoCoMo.
-- **Temporal extraction is the weakest link** (13.9–15.3%): the extractor's parsing of relative time ("a few days later", "yesterday") is a known weakness.
-- The LoCoMo numbers are **single runs**, not multi-run means, so they are less stable than the 5-run Conflict_Resolution numbers above.
-- LoCoMo's questions mostly depend on the most recent 1–2 sessions (as other work has noted), so it does not strongly probe long-horizon memory.
+</details>
 
-## How it works
+## Quick start
 
-1. **Extract.** An LLM converts source text into four tables: `facts` for assertions, `cards` for events, `metrics` for measurements, and `identities` for entities. Deterministic validation checks the output, and citations must be substrings of the source.
-2. **Resolve conflicts.** Supersession chains track versions of the same subject. Older values are marked with `invalidated_at`; folding retains the latest version by sequence number.
-3. **Retrieve.** Multi-field BM25 and `all-MiniLM-L6-v2` vector search are combined using reciprocal rank fusion (RRF). Database embeddings are cached.
-4. **Answer.** Retrieved evidence is passed to an LLM. For multi-hop questions, optional Self-Ask-style iteration decomposes the question into single-hop subquestions, retrieves evidence at each step, and builds an answer from the evidence chain.
-
-## Installation / Quick Start
-
-**Requirements:** Python 3.10+ and a DeepSeek API key for extraction. The answer model can use an OpenAI-compatible API, such as DeepSeek or OpenAI.
+### 1. Install
 
 ```bash
-pip install rank-bm25 sentence-transformers python-dotenv
+git clone https://github.com/jing-ying-dev/whale-ying-memory.git
+cd whale-ying-memory
+python -m pip install -r requirements.txt
+```
+
+Python 3.10+ is required. Extraction can use the DeepSeek API or a local Ollama-compatible endpoint.
+
+### 2. Configure an extraction model
+
+DeepSeek:
+
+```bash
 export DEEPSEEK_API_KEY="your-api-key"
 ```
 
-The extractor itself uses the Python standard library and the project’s `deepseek_api` adapter; the packages above support the retrieval system.
+PowerShell:
 
-To enable iterative multi-hop answering, set:
+```powershell
+$env:DEEPSEEK_API_KEY = "your-api-key"
+```
+
+Or use Ollama through its OpenAI-compatible endpoint:
 
 ```bash
-export WHALE_YING_ITERATIVE=1
+export DEEPSEEK_API_PROVIDER=ollama
+export DEEPSEEK_MODEL=qwen2.5-coder:7b
 ```
 
-Iterative answering is off by default. The workflow is **extract → fold superseded values → retrieve → answer**. See `extractor/extract.py` for the extraction flow and `memory/whale_ying.py` for retrieval, folding, and answering.
+### 3. Extract structured memory
 
-Extraction sends source text to the configured LLM API. Review your provider’s data handling before processing sensitive material.
+```bash
+python extractor/extract.py \
+  --chunk examples/sample_chunk.json \
+  --out output/entities.json \
+  --log-dir output
+```
 
-## Project structure
+The output contains the four structured tables. The build log records validation, coverage, source-grounding, retry, and density information.
+
+### 4. Use the MemoryAgentBench adapter
+
+[`memory/whale_ying.py`](memory/whale_ying.py) exposes the benchmark integration hooks:
+
+- `initialize_our_agent(...)`
+- `handle_our_agent(...)`
+- `WHALE_YING_ITERATIVE=1` to enable multi-hop iteration
+- `WHALE_YING_STORE_SAVE` / `WHALE_YING_STORE_LOAD` to separate extraction and evaluation stages
+
+The answer model is supplied by the host agent/benchmark through an OpenAI-compatible interface.
+
+## Repository structure
 
 ```text
-extractor/
-├── extract.py          # Extraction flow
-├── deepseek_api.py     # LLM adapter
-├── schema.json         # Four-table schema
-└── extract_rules.json  # Validation rules
-
-memory/
-└── whale_ying.py       # Retrieval, folding, and multi-hop answering
+.
+├── extractor/
+│   ├── extract.py          # Four-table extraction and deterministic gates
+│   ├── deepseek_api.py     # DeepSeek / Ollama-compatible LLM adapter
+│   ├── schema.json         # Structured memory schema
+│   └── extract_rules.json  # Field production and validation rules
+├── memory/
+│   └── whale_ying.py       # Folding, retrieval, reranking, and multi-hop adapter
+├── assets/                 # README demo and social-preview artwork
+├── results/                # Raw multi-hop benchmark outputs
+├── docs/
+│   ├── project-story.md
+│   └── development-cost.md
+├── examples/
+│   └── sample_chunk.json
+├── ARCHITECTURE.md
+└── LICENSE
 ```
+
+## Development direction
+
+- **Historical-state retrieval** — preserve and query superseded values when the question asks about the past.
+- **Stronger temporal normalization** — improve relative-time extraction and cross-event timelines.
+- **Local-first memory** — keep extraction and retrieval deployable with local models for high-privacy environments.
+- **One memory server, many lightweight agents** — centralize expensive extraction while keeping retrieval clients inexpensive.
+- **Packaged agent API and reproducible evaluation** — make integration and independent benchmark reproduction easier.
+
+## Built from scratch on a laptop
+
+WhaleYing Memory was started by a 21-year-old third-year Traditional Chinese Medicine student with no formal computer science or AI background. Development began with API experiments on 14 October 2026 and shifted to agent long-term memory on 22 October. The current benchmark results were reached on 18–19 November.
+
+The system was developed and evaluated on a Windows 11 laptop with an Intel i5-13420H, 16 GB RAM, and no discrete GPU. The goal of open-sourcing it is to turn the work already invested into the compute, collaboration, and feedback needed for the next stage.
+
+Read the longer [project story](docs/project-story.md) and the recorded [development cost](docs/development-cost.md).
 
 ## License
 
-Apache-2.0.
+[Apache-2.0](LICENSE)

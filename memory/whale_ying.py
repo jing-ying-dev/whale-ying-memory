@@ -19,9 +19,11 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-# l1test 根：whale_ying.py -> methods -> MemoryAgentBench -> l1test
-L1TEST = Path(__file__).resolve().parents[2]
-EXTRACTOR_DIR = L1TEST / "抽取器"
+# Repository-local paths. The original benchmark copy lived under
+# l1test/MemoryAgentBench/methods; the open-source layout keeps the extractor
+# next to this adapter so the module remains portable after cloning.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+EXTRACTOR_DIR = REPO_ROOT / "extractor"
 if str(EXTRACTOR_DIR) not in sys.path:
     sys.path.insert(0, str(EXTRACTOR_DIR))
 
@@ -172,10 +174,10 @@ def initialize_our_agent(agent, agent_config=None):
     agent._emb_model = None
     agent._emb_failed = False    # 向量模型加载失败就永久退回 BM25-only
     agent._retr_cache = None     # 检索缓存：BM25 索引 + 整库向量只建一次（治每题全库重编码 ~60s）
-    # 显式加载 l1test\.env，确保 DEEPSEEK_API_KEY 进环境（抽取器走 DeepSeek）
+    # Load a repository-local .env when present; secrets remain outside source control.
     try:
         from dotenv import load_dotenv
-        load_dotenv(str(L1TEST / ".env"))
+        load_dotenv(str(REPO_ROOT / ".env"))
     except Exception:
         pass
     import extract as ex

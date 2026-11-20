@@ -1,0 +1,26 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Generated extraction artifacts
+output/
+extractor/out/
+extractor/failed/
+*.log
+
+# Model and retrieval caches
+.cache/
+.cache_whale_ying/
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
