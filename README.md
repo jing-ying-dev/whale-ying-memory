@@ -24,6 +24,8 @@ It is built for the failure cases that plain long context and ordinary RAG handl
 
 The demos query a prebuilt 262k memory store from an agent interface. WhaleYing loads the structured store, retrieves evidence, and sends the relevant evidence to DeepSeek for answering. The timings printed by the system are the original measured timings.
 
+Demo questions and answer keys are from [MemoryAgentBench](https://github.com/yyhugo/MemoryAgentBench) (MIT License, © 2026 Yuanzhe Hu).
+
 ### 1. Single question: retrieve, answer, verify
 
 <div align="center">
@@ -133,6 +135,8 @@ LoCoMo uses the official F1 string-match metric and official QA prompt, with Dee
 | **Overall F1** | **38.6%** | **36.3%** |
 
 These results identify a clear task boundary. The current fold is designed to answer **“what is true now?”** by retaining the latest value. LoCoMo often asks **“what happened before?”**, where removing superseded values loses useful history. Relative-time extraction is also the weakest current component at 13.9–15.3% F1. Historical-state retrieval and stronger temporal normalization are therefore direct development targets.
+
+Only the reported LoCoMo scores are cited here; the LoCoMo data is CC BY-NC 4.0 (non-commercial), so its data files are not redistributed in this repository.
 
 </details>
 
