@@ -753,8 +753,8 @@ def _dp_parse(raw, base_iso):
     confidence / parse failure -> None."""
     if DATEPARSER is None:
         raise ExtractError(
-            "dateparser 不可用（task-102 二）：请确认 工作区/vendor/ 下有 dateparser，"
-            "或跑 py -3 runs/102/fetch_wheels.py + py -3 runs/102/install_vendor.py")
+            "dateparser unavailable: confirm dateparser is present under workspace/vendor/, "
+            "or run the vendor install scripts")
     if time_expr_rejected(raw):
         return None
     from datetime import datetime
@@ -1675,8 +1675,8 @@ def load_rules(schema, path=None):
                                     "（一致性规则：nullable ⇒ 非 required，R12）" % key)
                 if fill != "derived" or on_missing != "fill":
                     if on_missing != "null":
-                        problems.append("%s: nullable=True 只能配 fill=derived + on_missing=fill"
-                                        "（或 task-101 的 on_missing=null：缺省写 null）" % key)
+                        problems.append("%s: nullable=True only allowed with fill=derived + on_missing=fill"
+                                        % key)
             if fill == "derived" and spec.get("derive") not in DERIVERS:
                 problems.append("%s: fill=derived 但 derive=%r 不是已实现的派生算法 %s"
                                 % (key, spec.get("derive"), sorted(DERIVERS)))
@@ -2413,9 +2413,9 @@ def time_norm_recompute(entities, rules, chunk):
             "red": red, "ok": not red,
             # denominator=0 => unverified, not shown as passing
             "verdict": "fail" if red else ("pass" if den else "unverified"),
-            "algorithm": "time_norm == normalize_time(time_raw, time_ref)（与抽取器归一化同源）；"
-                         "推不出 => time_norm=null（不是 red、也不许保留模型自报值，task-101）；"
-                         "行.time_ref 必须等于 chunk.time_ref（不等=红，task-80/P239）"}
+            "algorithm": "time_norm == normalize_time(time_raw, time_ref) (same source as the extractor's normalization); "
+                         "underivable => time_norm=null (not red, and never keep the model-reported value); "
+                         "row.time_ref must equal chunk.time_ref (mismatch = red)"}
 
 
 def enforce_time_norm_reproducible(entities, rules, chunk, warnings=None):
@@ -2426,11 +2426,12 @@ def enforce_time_norm_reproducible(entities, rules, chunk, warnings=None):
                         for r in info["mismatch_rows"][:5])
         bad = "；".join("%s %s" % (r["where"], r["why"]) for r in info["unreproducible_rows"][:5])
         warn_note(warnings, "time_norm_mismatch",
-                  "time_norm 复算报红（task-78）：不符 %d 行、解不出 %d 行 —— 时间列是「取最新」的"
-                  "唯一依据，重算对不上就是键错了（明细见 monitor.time_norm_gate）。%s%s"
+                  "time_norm recomputation red: %d rows mismatched, %d rows unparseable — "
+                  "the time column is the sole basis for \"take the latest\"; a recomputation "
+                  "mismatch means a wrong key (details in monitor.time_norm_gate). %s%s"
                   % (info["mismatch"], info["unreproducible"],
-                     ("不符：%s。" % head) if head else "",
-                     ("解不出：%s。" % bad) if bad else ""))
+                     ("mismatch: %s." % head) if head else "",
+                     ("unparseable: %s." % bad) if bad else ""))
     return info
 
 
@@ -2524,7 +2525,7 @@ def _extra_derived_assertions(entities, rules, chunk):
             if str(stored or "") != str(want):
                 out.append({"field": "op_type", "where": "%s[#%d].op_type" % (table, i),
                             "stored": stored, "recomputed": want,
-                            "why": "动作词 %r 查别名表应归 %r（task-104 一⑤：动作词->枚举）"
+                            "why": "action word %r looked up in the alias table should map to %r"
                                    % (src, want)})
     for table, spec in _table_of_field(rules, "值"):
         for i, row in enumerate(entities.get(table) or [], 1):
@@ -2540,7 +2541,7 @@ def _extra_derived_assertions(entities, rules, chunk):
             if not NUM_VALUE_RE.match(sval):
                 out.append({"field": "值", "where": where + ".值", "stored": val,
                             "recomputed": None,
-                            "why": "值不是数值表达（task-104 一⑤：数值表达要能正则复算）"})
+                            "why": "值 is not a numeric expression"})
             unit = row.get("单位")
             sunit = "" if unit is None else str(unit).strip()
             if not sunit:
@@ -2549,7 +2550,7 @@ def _extra_derived_assertions(entities, rules, chunk):
                 continue
             out.append({"field": "单位", "where": where + ".单位", "stored": unit,
                         "recomputed": None,
-                        "why": "单位 %r 不在单位表里、原句也没有（task-104 一⑤）" % sunit})
+                        "why": "单位 %r not in the unit table nor in the source sentence" % sunit})
     return out
 
 
@@ -2616,8 +2617,8 @@ def recompute_derived(entities, rules, chunk):
             "mismatch": len(mismatch), "mismatch_rows": mismatch[:50],
             "unreproducible": len(missing), "unreproducible_rows": missing[:50],
             "fields": list(DERIVED_FIELD_NAMES), "per_field": per_field,
-            "algorithm": "派生值(time_norm/time_precision/op_type/canonical_id/值/单位) 必须能由行内"
-                         "输入按本文件同一实现重算出来且逐字符一致；不一致=红（task-104 一：全覆盖）"}
+            "algorithm": "derived values (time_norm/time_precision/op_type/canonical_id/值/单位) must be "
+                         "recomputable from the row's inputs by this file's same implementation, character-for-character identical; mismatch = red"}
 
 
 def enforce_time_precision_consistent(entities, rules, warnings=None):
@@ -2670,7 +2671,7 @@ def enforce_time_precision_consistent(entities, rules, warnings=None):
             "algorithm": "精度不是独立字段：从 (time_raw, time_norm) 推出来的，推不出就得说 unknown"}
     if red and warnings is not None:
         warn_note(warnings, "time_precision_mismatch",
-                  "时间精度不自洽 %d 行（task-107 五b：我们自己的实现错）——%s"
+                  "time precision inconsistent in %d rows — %s"
                   % (len(mism),
                      "；".join("%s 存 %r 应为 %r（raw=%r norm=%r）"
                               % (m["where"], m["stored"], m["expected"],
@@ -2707,15 +2708,15 @@ def traceability_assert(entities, rules, chunk, trace_hits=None, warnings=None):
                                 "必须能由（原文, 基准）按同一实现重算——provenance，不是逐字"},
             "recompute": recompute,
             "red": red, "ok": (not red) and not hits,
-            "levels": "task-104 一：两级分开——剪贴字段=逐字子串（verbatim）；派生字段=可重算"
-                      "（recompute）；不混成一句「逐字校验」",
+            "levels": "two levels kept separate — verbatim fields = exact substring (verbatim); derived fields = "
+                      "recomputable (recompute); not conflated into one \"verbatim check\"",
             "algorithm": "① 剪贴字段必须逐字出现在 chunk 原文（子串）；② 派生字段必须能重算且逐字符"
                          "一致（全覆盖：时间/精度/动作类型/规范名/值/单位；不一致=红）"}
     if hits and warnings is not None:
         shown = "；".join("%s %s=%r" % (h["where"], h["field"], h["value"]) for h in hits[:5])
         warn_note(warnings, "time_raw_not_verbatim",
-                  "可追溯性断言①：剪贴自检抓到 %d 行改写（time_raw 在 chunk 原文里找不到）："
-                  "%s——已置 null，产物不留假值（task-102 一）" % (len(hits), shown))
+                  "traceability assertion ①: verbatim self-check caught %d rewritten rows "
+                  "(time_raw not found in the chunk source): %s — set to null; output keeps no fake value" % (len(hits), shown))
     if red and warnings is not None:
         heads = ["%s 存 %r 应为 %r" % (r["where"], r.get("stored"), r.get("recomputed"))
                  for r in recompute["mismatch_rows"][:5]]
@@ -2766,8 +2767,8 @@ def span_alarm_of(entities, rules, chunk, warnings=None):
             "hint": "跨度 > 24h 且含相对时间：chunk 级基准不可信，这个 chunk 必须升级到 turn/session 基准"}
     if alarm and warnings is not None:
         warn_note(warnings, "chunk_base_unreliable",
-                  "跨度报警（task-102 三）：chunk %r 内时间跨度 %.1f 小时 > %.0f 小时、且含 %d 条相对时间"
-                  "——chunk 级基准不可信（这个 chunk 需要 turn/session 级基准）"
+                  "span alarm: chunk %r spans %.1f hours > %.0f hours and contains %d relative-time rows"
+                  " — chunk-level base unreliable (this chunk needs a turn/session-level base)"
                   % (info["chunk"], span, SPAN_ALARM_HOURS, len(relative_rows)))
     return info
 
@@ -2885,7 +2886,7 @@ def quote_substring_gates(raw, final):
             "gate_raw": raw, "gate_final": final,
             "rule": "判据只看 gate_final.ok==True；gate_raw 红只当诊断（说明模型这次给了非原文引文、"
                     "已被清洗掉），不许拿 gate_raw 红去判整格不过",
-            "why": "闸跑清洗前、产物看清洗后，两者不一致会骗人（审查端 P349）"}
+            "why": "the gate runs pre-scrub while the output is judged post-scrub; the two disagreeing is deceptive"}
 
 
 # ---------------------------------------------------------------- counters unified to int
@@ -3036,8 +3037,8 @@ def finalize_gates(monitor):
                                 _fmt_leaf(qg["dropped_cards"])))
         monitor["quote_substring_gate"] = qg
     monitor["counter_policy"] = {
-        "rule": "计数器字段一律 int（0=数了是 0）；没统计的写 0 并在该闸加 "
-                "unverified=True + unverified_fields（task-109 / 审查端 P350）",
+        "rule": "counter fields are always int (0 means counted as 0); uncounted ones write 0 and add "
+                "unverified=True + unverified_fields",
         "gates_normalized": done,
         "not_counters": "ratio / hours 这类比值仍允许 null（不是计数器）",
     }
@@ -3118,11 +3119,11 @@ def enforce_quote_substring(entities, rules, text, warnings=None, retried=False)
             entities[table] = [r for i, r in enumerate(rows, 1) if i not in idxs]
     if viol:
         warn_note(warnings, QUOTE_INVALID,
-                  "运行时子串校验（task-107 二）：%d 处 quote 不原文（锚点 %d 处=丢 %d 行，"
-                  "辅助子字段 %d 处=只丢字段；dropped_cards=%d）%s"
+                  "runtime substring check: %d quotes not verbatim (anchor: %d = %d rows dropped, "
+                  "auxiliary sub-field: %d = field dropped only; dropped_cards=%d)%s"
                   % (len(viol), sum(1 for v in viol if v["anchor"]),
                      len(dropped_rows), len(dropped_fields), len(dropped_rows),
-                     "；片级已重试一轮仍不过" if retried else ""))
+                     "; piece-level retry already ran once and still failed" if retried else ""))
     # this one is **gate_raw** (computed pre-scrub) — diagnostic only, the criterion is gate_final
     return {"kind": "gate_raw",
             "ok": not viol, "red": bool(viol),
@@ -3157,8 +3158,8 @@ def enforce_quote_ratio(entities, schema, warnings=None):
     info["ok"] = info["ratio"] >= qmin
     if not info["ok"]:
         raise ExtractError(
-            "quote 占比 %d/%d=%.4f < %.4f（task-74 分母 A：缺引文的 %d 行已从分母剔除；"
-            "剩下的是没登记的静默缺口，schema.gates.quote_ratio_min 重试不放宽）"
+            "quote ratio %d/%d=%.4f < %.4f (%d missing-quote rows removed from the denominator; "
+            "the rest is the unregistered silent gap, schema.gates.quote_ratio_min retry does not relax)"
             % (info["with_quote"], info["denominator"], info["ratio"], qmin, info["quote_missing"]))
     return info
 
@@ -3207,7 +3208,7 @@ def read_lookup_manifest(path=None):
     """
     p = pathlib.Path(path or lookup_scope_path())
     if not p.is_file():
-        raise ExtractError("lookup 全库清单缺失：%s（task-80：全库边界必须显式，不能退化成单 chunk）" % p)
+        raise ExtractError("lookup whole-library manifest missing: %s" % p)
     doc = json.loads(p.read_text(encoding="utf-8"))
     out = []
     for it in doc.get("files") or []:
@@ -3612,7 +3613,7 @@ def load_e2e_asserts(path=None):
     """
     p = pathlib.Path(path) if path else E2E_ASSERTS_PATH
     if not p.is_file():
-        raise ExtractError("端到端断言清单不存在：%s（task-107 三：字段新增必须配断言）" % p)
+        raise ExtractError("end-to-end assertion list does not exist: %s" % p)
     doc = load_json(p, "e2e_asserts")
     items = doc.get("asserts") if isinstance(doc, dict) else doc
     if not isinstance(items, list) or not items:
@@ -3636,8 +3637,10 @@ def check_e2e_field_coverage(asserts):
     missing = [f for f in QUERY_FIELD_CONTRACT if f not in covered]
     if missing:
         raise ExtractError(
-            "端到端断言覆盖不全（task-107 三）：查询侧契约字段 %s 没有任何一条断言把答案侧字段"
-            "写进预期——加字段却只写单测，就是这个坑（time_precision 的第二次）。现有覆盖：%s"
+            "end-to-end assertion coverage incomplete: query-side contract field %s has no "
+            "assertion writing the answer-side field into the expectation — adding a field but "
+            "only writing a unit test is exactly this hole (the second occurrence for time_precision). "
+            "Current coverage: %s"
             % ("、".join(missing),
                "；".join("%s<-%s" % (k, ",".join(map(str, v))) for k, v in covered.items())))
     return {"ok": True, "covered": covered,
@@ -3844,8 +3847,8 @@ def normalize_row(table, row, chunk, props, warnings, idx, ctx, piece=None):
                 {"where": where, "field": name, "value": val,
                  "why": "值在 chunk 原文里找不到（纯剪贴字段被改写）"})
             warn_row(warnings, where, "time_raw_not_verbatim",
-                     "%s: %r=%r 在 chunk 原文里找不到（time_raw 是纯剪贴，不许改写成别的写法）"
-                     " -> 置 null，time_norm 跟着 null（task-101）" % (where, name, val),
+                     "%s: %r=%r not found in the chunk source (time_raw is pure verbatim, "
+                     "must not be rewritten into a different form) -> set null, time_norm becomes null too" % (where, name, val),
                      piece=piece)
             row[name] = None
     # tier A: fill=derived fields are produced by the program (overwriting any model-reported
@@ -3914,7 +3917,7 @@ def normalize_row(table, row, chunk, props, warnings, idx, ctx, piece=None):
         if mapped != OP_ALIAS_DEFAULT:
             row[name] = mapped
             warn_row(warnings, where, "op_type_alias",
-                     "%s: %r=%r 按动作词改判（动作=%r -> %s；task-101 英文别名表）"
+                     "%s: %r=%r re-judged by action word (action=%r -> %s via the English alias table)"
                      % (where, name, OP_ALIAS_DEFAULT, src, mapped), piece=piece)
     return row
 
@@ -4048,8 +4051,7 @@ def apply_content_gates(entities, rules, warnings):
                 report["examples"].append({"where": where, "field": field, "value": v,
                                            "code": CONTENT_GATE_SHAPE, "action": "kept"})
             warn_row(warnings, where, CONTENT_GATE_SHAPE,
-                     "%s: %s=%r 是纯标识符形态且不含中文 -> 疑似把标识当动作"
-                     "（task-67 ②：形态规则，只报警不丢行；正常动作应是中文动宾如「改配置」）"
+                     "%s: %s=%r is pure identifier shape with no CJK -> suspected identifier mistaken for an action"
                      % (where, field, v))
     report["shape_suspect"] = shape
     if ident is None:
@@ -4087,7 +4089,7 @@ def apply_content_gates(entities, rules, warnings):
             report["examples"].append({"where": where, "field": field, "value": value,
                                        "code": code, "action": "dropped"})
         warn_row(warnings, where, code,
-                 "%s: %s=%s -> 报红并丢弃该行（task-66 ①：枚举值当标识名，丢弃 %d 行）"
+                 "%s: %s=%s -> red and drop the row (enum value used as identifier name, dropped %d rows)"
                  % (where, field, why, report["dropped_rows"]))
     entities[ident] = kept
     # ② same-string cross: within one chunk an identifier name == card action/target (exactly equal) => routing mismatch
@@ -4112,8 +4114,8 @@ def apply_content_gates(entities, rules, warnings):
                 report["examples"].append({"where": where, "field": field, "value": v,
                                            "code": CONTENT_GATE_CROSS, "action": "kept"})
             warn_row(warnings, where, CONTENT_GATE_CROSS,
-                     "%s: %s=%r 与卡片 action/target 完全相同（同一片段既当动作又当标识）"
-                     "-> 报红（task-66 ②：路由错位，不丢行，交抽检/人看）" % (where, field, v))
+                     "%s: %s=%r is exactly the same as a card action/target (the same fragment used as both action and identity)"
+                     "-> red" % (where, field, v))
             break
     report["cross_same_string"] = cross
     return report
@@ -4168,8 +4170,7 @@ def apply_identity_generic_gate(entities, rules, warnings):
         if len(report["examples"]) < 10:
             report["examples"].append({"where": where, "value": raw, "reason": why})
         warn_row(warnings, where, CONTENT_GATE_GENERIC,
-                 "%s: 完整原文写法=%r %s -> 疑似通称不具名（task-70 ④：标识要写到具体名字，"
-                 "只写扩展名/后缀词的行 join 会串味；不丢行，交抽检/人看）"
+                 "%s: 完整原文写法=%r %s -> likely generic term not naming anything"
                  % (where, raw, why))
     return report
 
@@ -4207,7 +4208,7 @@ def enforce_fk_invariants(entities, rules):
                 problems.append("%s: event_id=%r 不在 cards 的 event_id 集合里（不许悬空外键）"
                                 % (where, eid))
     if problems:
-        raise ExtractError("外键不变量破了（task-70 ② / R12）：\n- "
+        raise ExtractError("foreign-key invariant broken:\n- "
                            + "\n- ".join(problems[:10]))
     return {"rows_checked": checked, "nullable_tables": sorted(rules.mention_tables),
             "ok": True}
@@ -4530,8 +4531,7 @@ def extract(chunk, schema, replay_text=None, prompt=None, rules=None, rules_path
                 qviol = quote_substring_violations(doc, rules, text)
                 if qviol and attempt < max_try:
                     raise PieceRejected(
-                        "quote 不是 source_chunk 的子串 %d 处（task-107 二：引文必须是原文剪贴，"
-                        "翻译/改写不算）：%s"
+                        "quote is not a substring of source_chunk at %d place(s): %s"
                         % (len(qviol),
                            "；".join("%s.%s=%r" % (v["table"], v["field"], v["value"][:30])
                                     for v in qviol[:3])))
@@ -4686,10 +4686,11 @@ def extract(chunk, schema, replay_text=None, prompt=None, rules=None, rules_path
                (fk_sum["per_table"][t])["explicit_ratio"] * 100)
             for t in low_tables)
         warn_note(warnings, "fk_explicit_low",
-                  "fk 归属 explicit 覆盖率低于 %d%%（分表算，task-70 ③）：%s。"
-                  "aggregate 行（派生汇总量）不进分母；identities（mention）不进 explicit 分母。"
-                  "合并算的比例没意义，别用；达不到说明数据汇总段没和事件卡对齐，"
-                  "需要单独处理（回来查 prompt 或汇总段切分）。"
+                  "fk attribution explicit coverage below %d%%: %s. "
+                  "aggregate rows (derived totals) do not enter the denominator; identities (mention) "
+                  "do not enter the explicit denominator. The merged ratio is meaningless, do not use it; "
+                  "falling short means the summary segment is not aligned with event cards, "
+                  "and needs separate handling (check the prompt or summary-segment split)."
                   % (FK_EXPLICIT_RATIO_MIN * 100, shown))
     # empty-denominator tables are counted separately (ratio is null, not 100%, and they do not
     # enter the passing denominator)
@@ -4700,19 +4701,21 @@ def extract(chunk, schema, replay_text=None, prompt=None, rules=None, rules_path
                (fk_sum["per_table"][t]).get("aggregate", 0))
             for t in fk_sum["vacuous_tables"])
         warn_note(warnings, "fk_vacuous_tables",
-                  "空分母表 %d 张（task-71 ①）：%s —— 比值记 null/N/A，不是 100%%，"
-                  "也不进总体达标分母（达标只看有分母的表：%s）。"
-                  "一张全是汇总值的 chunk 不会再显示「explicit 100%%」。"
+                  "%d empty-denominator tables: %s — ratio recorded as null/N/A, not 100%%, "
+                  "and they do not enter the overall passing denominator (only tables with a "
+                  "denominator count: %s). A chunk of all summary values no longer shows "
+                  "\"explicit 100%%\"."
                   % (fk_sum["vacuous_table_count"], shown_v,
                      ("、".join(fk_sum["scored_tables"]) if fk_sum["scored_tables"] else "无")))
     # aggregate / mention reported separately (they are not "low-confidence nearest", they are
     # two different things)
     if fk_sum["aggregate"] or fk_sum["mention"]:
         warn_note(warnings, "fk_aggregate_mention",
-                  "非 explicit 行已拆两类（task-70 ①）：aggregate %d 行（metrics/facts 派生汇总量，"
-                  "无单一源事件，指向该 chunk 汇总段）、mention %d 行（identities 名称提及，"
-                  "锚点 source_chunk_id+抽取位置+quote，event_id 可选不硬造）。"
-                  "跨表 join 只用 explicit/contain 行作答；分表覆盖率见 fk.per_table。"
+                  "non-explicit rows split into two kinds: aggregate %d rows (derived totals in "
+                  "metrics/facts, no single source event, pointing at this chunk's summary segment), "
+                  "mention %d rows (name mentions in identities, anchored by source_chunk_id+抽取位置+quote, "
+                  "event_id optional and not fabricated). Cross-table join only answers with "
+                  "explicit/contain rows; per-table coverage in fk.per_table."
                   % (fk_sum["aggregate"], fk_sum["mention"]))
     # identities' mention coverage seen separately (has a quote and is locatable counts)
     ident = (fk_sum.get("per_table") or {}).get("identities") or {}
@@ -4785,7 +4788,7 @@ def extract(chunk, schema, replay_text=None, prompt=None, rules=None, rules_path
             info = coverage["tables"][table]
             if info["extra"]:
                 warn_note(warnings, "expected_extra",
-                          "%s 有清单外的行 %d 条（task-77 ② 只 warning 不红）：%s"
+                          "%s has %d rows outside the list: %s"
                           % (table, len(info["extra"]),
                              "；".join(info["extra"][:5])))
 
@@ -4834,16 +4837,18 @@ def extract(chunk, schema, replay_text=None, prompt=None, rules=None, rules_path
     }
     if content_gates["red"]:
         warn_note(warnings, "content_gate_red",
-                  "内容闸报红（task-66 ①②）：枚举值当标识名丢 %d 行、名称==类型丢 %d 行、"
-                  "同串交叉 %d 处 —— 明细见 monitor.content_gates"
+                  "content gates red: %d rows dropped for enum value as identifier name, "
+                  "%d rows dropped for 名称==类型, %d same-string crosses — "
+                  "details in monitor.content_gates"
                   % (content_gates["enum_value_dropped"],
                      content_gates["name_equals_type_dropped"],
                      content_gates["cross_same_string"]))
     if generic_gate["suspected"]:
         warn_note(warnings, "identity_generic_gate",
-                  "标识通称不具名 %d 行（task-70 ④）：完整原文写法 是纯扩展名/纯后缀词"
-                  "（.bak、备份 这类），join 时会把不同东西串成一个 —— 明细见 "
-                  "monitor.identity_generic（只报警，不丢行）" % generic_gate["suspected"])
+                  "%d identity rows are generic terms not naming anything: 完整原文写法 is only "
+                  "an extension/suffix word (like .bak, backup), joining would conflate "
+                  "different things — details in monitor.identity_generic (warn only, keep row)"
+                  % generic_gate["suspected"])
     if monitor["warning_rate_verdict"] == "fail":
         warn_note(warnings, "warning_rate_high",
                   "warning 率 %d/%d=%.2f%% 超过 %.1f%% 阈值：回来查 prompt 或拆片"
@@ -4851,14 +4856,14 @@ def extract(chunk, schema, replay_text=None, prompt=None, rules=None, rules_path
     elif monitor["warning_rate_verdict"] == "unverified":
         # denominator=0 is not "passing", it is "unverified" — must be said, no silent green
         warn_note(warnings, "gate_unverified",
-                  "warning 率闸未检验（分母=0：没有可统计的行）——task-104 五：分母=0 一律不算通过")
+                  "warning rate gate unverified (denominator=0: no countable rows) — denominator=0 never counts as passing")
     if monitor["reject_rate_verdict"] == "fail":
         warn_note(warnings, "reject_rate_high",
                   "拒片率 %d/%d=%.2f%% 超过 %.1f%% 阈值：回来查 prompt 或拆片"
                   % (len(failed), pieces_total, (reject_rate or 0) * 100, REJECT_RATE_MAX * 100))
     elif monitor["reject_rate_verdict"] == "unverified":
         warn_note(warnings, "gate_unverified",
-                  "拒片率闸未检验（分母=0：没有片）——task-104 五：分母=0 一律不算通过")
+                  "reject rate gate unverified (denominator=0: no pieces) — denominator=0 never counts as passing")
 
     # missed within the list = red (not "missing a little") — written as a chunk-level warning;
     # main() decides the exit code (2), so the output still lands and the trail shows which ones were missed.
@@ -4868,15 +4873,16 @@ def extract(chunk, schema, replay_text=None, prompt=None, rules=None, rules_path
             for k in coverage["tables"][table]["missing"]:
                 miss.append("%s:%s" % (table, k))
         warn_note(warnings, "expected_missing",
-                  "覆盖式断言报红（task-77 ②）：人工清单内漏抽 %d 条 —— %s"
+                  "coverage-style assertion red: %d entries missed within the human list — %s"
                   % (coverage["missing_total"], "；".join(miss[:8])))
 
     # quote ratio gate (denominator A): missing-quote rows removed from denominator, gap listed separately, not a whole-run failure
     quote_gate = enforce_quote_ratio(entities, schema, warnings)
     if quote_gate["quote_missing"]:
         warn_note(warnings, "rows_quote_missing",
-                  "缺引文行 %d/%d（task-74）：已从 quote 闸分母剔除、逐行列在 quote_missing_rows，"
-                  "不整份作废——缺的是引文，不是事实（引文缺口 %.2f%%，覆盖率 %.2f%%）"
+                  "%d/%d rows missing quotes: removed from the quote gate denominator and listed "
+                  "per row in quote_missing_rows, not invalidating the whole output — what is "
+                  "missing is the quote, not the fact (quote gap %.2f%%, coverage %.2f%%)"
                   % (quote_gate["quote_missing"], quote_gate["rows"],
                      quote_gate["gap_ratio"] * 100, quote_gate["ratio"] * 100))
 
@@ -4890,11 +4896,13 @@ def extract(chunk, schema, replay_text=None, prompt=None, rules=None, rules_path
     # rows.
     if answer["answer_ok"] is False:
         warn_note(warnings, "fk_answer_rows_low",
-                  "能答题的行太少（task-71 ②，与 explicit_ratio 并列的判据）："
-                  "answer_rows %d / 三表 rows %d = %s（下限：answer_rows >= %d 且比例 >= %s）。"
-                  "answer 只算 explicit/contain 的行（aggregate/mention 不进答案），"
-                  "所以「覆盖率达标」不代表能答题——跨表 join 题要求相关事件与数据行都在 answer 里。"
-                  "占到这么少的行，先回来查汇总段/标识行是不是吃掉了大部分行。"
+                  "too few answerable rows: answer_rows %d / three-table rows %d = %s "
+                  "(lower bound: answer_rows >= %d and ratio >= %s). "
+                  "answer only counts explicit/contain rows (aggregate/mention do not enter "
+                  "the answer), so \"coverage met\" does not mean answerable — a cross-table "
+                  "join question requires the relevant event and data row to both be in answer. "
+                  "With so few rows, check first whether the summary segment/identity rows are "
+                  "consuming most of the rows."
                   % (answer["answer_rows"], answer["rows"],
                      ("%.1f%%" % (answer["answer_ratio"] * 100))
                      if answer["answer_ratio"] is not None else "N/A",
@@ -4907,8 +4915,9 @@ def extract(chunk, schema, replay_text=None, prompt=None, rules=None, rules_path
     # rows without an anchor do not silently vanish (list into result + chunk-level hint)
     if unlocated:
         warn_note(warnings, "rows_unlocated",
-                  "%d 行既无 抽取位置、无 quote，也没有能回原文的文字锚点（task-73 ①）："
-                  "行没静默丢，清单见 unlocated_rows；缺的是引文，不是事实" % len(unlocated))
+                  "%d rows have neither 抽取位置 nor quote, and no text anchor back to the "
+                  "source: rows are not silently dropped, list in unlocated_rows; what is "
+                  "missing is the quote, not the fact" % len(unlocated))
     monitor["unlocated_rows"] = len(unlocated)
     # the quote gap is listed separately (kept apart from coverage, not merged into one number)
     monitor["quote_missing_rows"] = len(quote_gate.get("quote_missing_rows") or [])
@@ -4923,8 +4932,8 @@ def extract(chunk, schema, replay_text=None, prompt=None, rules=None, rules_path
     monitor["quote_substring_gate"] = quote_gates
     if quote_final["red"]:
         warn_note(warnings, "quote_gate_final_red",
-                  "gate_final 报红（task-108）：最终产物里仍有 %d 处 quote 不是原文子串"
-                  "（gate_raw invalid=%d，清洗没做干净）——明细见 "
+                  "gate_final red: the final output still has %d quotes that are not source "
+                  "substrings (gate_raw invalid=%d, scrub not clean) — details in "
                   "monitor.quote_substring_gate.gate_final"
                   % (quote_final["invalid"], quote_sub.get("invalid", 0)))
 
@@ -4935,8 +4944,8 @@ def extract(chunk, schema, replay_text=None, prompt=None, rules=None, rules_path
     if coverage is None:
         coverage = {"unverified": True, "verdict": "unverified",
                     "tables": {}, "missing_total": 0, "extra_total": 0,
-                    "note": "未给 --expected 清单：覆盖断言没数 => 计数器 0 + unverified=True"
-                            "（task-109：不许用 None 冒充 0）"}
+                    "note": "no --expected list given: coverage assertion uncounted => "
+                            "counter 0 + unverified=True"}
     coverage = normalize_gate("expected_coverage", coverage)
     monitor["quote_gate"] = quote_gate
     monitor["expected_coverage"] = coverage
@@ -5052,29 +5061,31 @@ def main(argv=None):
     ap.add_argument("--out", default=str(HERE / "out" / "entities.json"))
     ap.add_argument("--schema", default=str(DEFAULT_SCHEMA))
     ap.add_argument("--rules", default=None,
-                    help="extract_rules.json（默认取 schema 同目录；task-65 表驱动）")
+                    help="extract_rules.json")
     ap.add_argument("--replay", help="用文件里的模型响应文本代替真调（离线自测）")
     ap.add_argument("--dump-prompt", help="把最终 prompt 写到该文件")
     ap.add_argument("--dry-run", action="store_true", help="只打印 prompt 摘要，不调模型")
     ap.add_argument("--density-scan", default=None,
-                    help="task-66 ③：只体检，不抽卡——读 JSONL（build_log 条目 {chunk,chars,counts}），"
-                         "列出标识密度前 5%% 的 chunk")
+                    help="inspection only, no extraction — read JSONL (build_log entries {chunk,chars,counts}), "
+                         "list the top 5%% chunks by identity density")
     ap.add_argument("--density-top", type=float, default=0.05,
                     help="--density-scan 的异常分位（默认前 5%%）")
     ap.add_argument("--repeat", type=int, default=1,
-                    help="task-72 ①：同一 chunk 重复跑 N 次（默认 1；建议 3），报中位数+区间，"
-                         "区间半宽 > ±10%% 的指标标 unstable（只当体检）")
+                    help="run the same chunk N times (default 1; suggest 3), report median + range, "
+                         "mark metrics whose half-range exceeds ±10%% as unstable (health only)")
     ap.add_argument("--log-dir", default=None,
-                    help="task-72 ②：build_log.jsonl 落到该目录（默认 out/）；"
-                         "要与 --out 同一处可查就指到同一目录")
+                    help="write build_log.jsonl to this directory (default out/); "
+                         "point it at the same directory as --out to keep them together")
     ap.add_argument("--answer-index", default=None,
-                    help="task-72 ③：把每行作答方法/event_id 落到该文件（成对覆盖判据的输入）")
+                    help="write each row's answer method/event_id to this file (input to the pairwise coverage criterion)")
     ap.add_argument("--pair-check", default=None,
-                    help="task-72 ③：成对覆盖题单（JSON 数组）；配合 --answer-index 逐题验"
-                         "「事件 + 它的数据行」是否同时在 answer 里；全成对 exit 0，否则 1")
+                    help="pairwise coverage question list (JSON array); with --answer-index, verify "
+                         "per question whether \"the event + its data row\" are both in answer; "
+                         "exit 0 if all pairs pass, else 1")
     ap.add_argument("--expected", default=None,
-                    help="task-77 ②：人工期望清单（expected.json）。清单内漏抽 = 红（exit 2）"
-                         "、清单外 = warning；清单是人读原文数的，不是抄产物")
+                    help="human expectation list (expected.json). Missed within the list = red (exit 2), "
+                         "beyond the list = warning; the list is counted by a human reading the source, "
+                         "not copied from output")
     args = ap.parse_args(argv)
 
     if args.pair_check:
@@ -5200,8 +5211,8 @@ def main(argv=None):
     nones = find_none_counters(result)
     no_line = find_gates_missing_report_line(result)
     if nones or no_line:
-        print("COUNTER POLICY FAILED: 计数器仍是 None %d 处%s；缺 report_line 的闸 %s —— "
-              "task-109：计数器只能是 int（没数的写 0 + unverified=True，别用 None 冒充）"
+        print("COUNTER POLICY FAILED: %d counters still None%s; gates missing report_line: %s — "
+              "counters must be int (uncounted ones write 0 + unverified=True, never use None to masquerade as 0)"
               % (len(nones),
                  ("（%s）" % "；".join(nones[:6])) if nones else "",
                  "、".join(no_line) if no_line else "无"), file=sys.stderr)
@@ -5237,7 +5248,7 @@ def main(argv=None):
     pg = result.get("precision_gate") or {}
     e2e = (result.get("e2e") or {}).get("report") or {}
     if pg.get("red") or (e2e.get("total") and not e2e.get("ok")):
-        print("TASK-107 GATES FAILED: precision 不自洽 %d 行；e2e 断言 %d/%d 红：%s"
+        print("PRECISION/E2E GATES FAILED: precision inconsistent in %d rows; e2e assertions %d/%d red: %s"
               % (pg.get("mismatch", 0), e2e.get("red", 0), e2e.get("total", 0),
                  "；".join("%s 存 %r 应为 %r" % (m["where"], m["stored"], m["expected"])
                           for m in (pg.get("rows") or [])[:5])),
