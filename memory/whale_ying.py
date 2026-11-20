@@ -428,8 +428,6 @@ def _freshness_pick(candidates):
 
 def _direct_answer(agent, message, final_rows, chain=None):
     """Answer in one step. Returns (text, in_tok, out_tok). `chain` is an optional list of [(sub-question, intermediate answer)] placed before the memory."""
-    from utils.templates import get_template
-    from utils.eval_data_utils import format_chat
     mem_lines = []
     if chain:
         mem_lines.append("Resolved intermediate steps (sub-question -> answer):")
@@ -439,8 +437,18 @@ def _direct_answer(agent, message, final_rows, chain=None):
                   for i, r in enumerate(final_rows)]
     memory_string = "\n".join(mem_lines)
     ask = (memory_string + "\n" + message) if memory_string else message
-    system_message = get_template(agent.sub_dataset, "system", agent.agent_name)
-    format_message = format_chat(message=ask, system_message=system_message)
+    try:
+        from utils.templates import get_template
+        from utils.eval_data_utils import format_chat
+        system_message = get_template(agent.sub_dataset, "system", agent.agent_name)
+        format_message = format_chat(message=ask, system_message=system_message)
+    except ImportError:
+        # Standalone (no MemoryAgentBench utils package): inline the equivalent system
+        # message and chat formatting so the adapter runs without the benchmark installed.
+        system_message = ("You are a helpful assistant that can read the context "
+                          "and memorize it for future retrieval.")
+        format_message = [{"role": "system", "content": system_message},
+                          {"role": "user", "content": ask}]
     # A dropped connection (SSL EOF) raises APIConnectionError: return empty (that question is marked wrong) rather than crashing the whole run
     for attempt in range(3):
         try:

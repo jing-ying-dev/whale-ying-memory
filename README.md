@@ -180,7 +180,26 @@ python extractor/extract.py \
 
 The output contains the four structured tables. The build log records validation, coverage, source-grounding, retry, and density information.
 
-### 4. Use the MemoryAgentBench adapter
+### 4. Run the standalone CLI (no benchmark needed)
+
+The repository can build a memory store and answer questions on its own, without MemoryAgentBench:
+
+```bash
+# Build a store from one or more documents (extraction + supersession/folding)
+python examples/build_store.py --doc document.txt --out memory.json
+
+# Ask a question (fold to latest → hybrid retrieval → rerank → answer)
+python examples/answer.py --store memory.json --question "What is the current value of X?"
+
+# Multi-hop question (Self-Ask iteration)
+python examples/answer.py --store memory.json --question "..." --iterative
+```
+
+- Extraction and reranking read `DEEPSEEK_API_KEY` (see step 2); answering reads the standard OpenAI environment variables `OPENAI_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_MODEL` (default `gpt-4o-mini`).
+- Large documents can be split for parallel extraction with `--chunk-chars 4000`.
+- The same entry points are available as `python -m whaleying.standalone` (subcommands `ingest` / `ask`).
+
+### 5. Use the MemoryAgentBench adapter
 
 [`memory/whale_ying.py`](memory/whale_ying.py) exposes the benchmark integration hooks:
 
@@ -202,12 +221,16 @@ The answer model is supplied by the host agent/benchmark through an OpenAI-compa
 │   └── extract_rules.json  # Field production and validation rules
 ├── memory/
 │   └── whale_ying.py       # Folding, retrieval, reranking, and multi-hop adapter
+├── whaleying/
+│   └── standalone.py       # Standalone CLI (ingest / ask), no benchmark dependency
 ├── assets/                 # README demo and social-preview artwork
 ├── results/                # Raw multi-hop benchmark outputs
 ├── docs/
 │   ├── project-story.md
 │   └── development-cost.md
 ├── examples/
+│   ├── build_store.py      # Document → memory store
+│   ├── answer.py           # Question → retrieval → answer
 │   └── sample_chunk.json
 ├── ARCHITECTURE.md
 └── LICENSE
