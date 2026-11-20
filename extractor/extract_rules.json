@@ -1,0 +1,399 @@
+{
+  "_version": 7,
+  "_task": "task-102（P332/P333）：① 两条可追溯性断言（time_raw 剪贴自检 + time_norm/canonical_id/event_id 推导自检）；② 时间归一化换 dateparser（低置信 -> None）；③ RELATIVE_BASE 三级基准（turn>session>chunk）+ base_source/base_granularity/time_uncertain；④ 中文样本回归；task-103：time_precision（day/minute/second，day 只到日期）+ 时区 aware",
+  "_note": "A/B/C 三档不再写在代码里：每个 schema 属性必须在这里显式声明 fill 与 on_missing，没有默认值（没声明 = schema 错，逼人表态）。fill: model=模型负责产出 / derived=程序负责产出；on_missing: fill=缺了程序补（必须配 derive）/ reject=缺了硬拒该片并重试 / warn=缺了容忍并 strip。一致性规则（P208，冲突根源是 required 与 on_missing 两份真相）：reject ⇒ 该字段必须 required；warn ⇒ 必须非 required；fill ⇒ required 与否都行。quote.归一化 的「可选」由 schema 的 quote.required 决定（R11 已去掉），代码按「对象内非 required 子字段为空则 strip」处理，不单独声明。_temp_fields 是临时字段（程序读完就 pop、不落产物、不在 schema）：只允许 fill=model、on_missing=warn；role=fk_hint 的字段用来显式指定该行所属事件——task-69 起字段名是 所属事件序号（整数，1..n），序号由程序按 抽取位置 升序给 cards 编号，LLM 不在卡片里写序号（P215 ③）。；task-70 新增可选属性 nullable：只允许配 fill=derived + on_missing=fill，且该字段在 schema 里必须非 required（nullable ⇒ 非 required，一致性 check 会拦）；目前只有 identities.event_id 用它（R12：名称提及多对多，缺省不硬造外键）。",
+  "_temp_fields": {
+    "metrics.所属事件序号": {
+      "fill": "model",
+      "on_missing": "warn",
+      "role": "fk_hint",
+      "note": "临时字段：该行所属事件的序号（整数 1..n，程序按 抽取位置 升序给 cards 编号）；越界/非整数算 hint_invalid，程序读完就 pop，不落产物、不在 schema"
+    },
+    "identities.所属事件序号": {
+      "fill": "model",
+      "on_missing": "warn",
+      "role": "fk_hint",
+      "note": "临时字段：该行所属事件的序号（整数 1..n，程序按 抽取位置 升序给 cards 编号）；越界/非整数算 hint_invalid，程序读完就 pop，不落产物、不在 schema"
+    },
+    "facts.所属事件序号": {
+      "fill": "model",
+      "on_missing": "warn",
+      "role": "fk_hint",
+      "note": "临时字段：该行所属事件的序号（整数 1..n，程序按 抽取位置 升序给 cards 编号）；越界/非整数算 hint_invalid，程序读完就 pop，不落产物、不在 schema"
+    }
+  },
+  "cards.event_id": {
+    "fill": "derived",
+    "on_missing": "fill",
+    "derive": "card_event_id",
+    "inputs": {
+      "pos": "抽取位置"
+    },
+    "note": "可留空，程序按 抽取位置 复算"
+  },
+  "cards.agent": {
+    "fill": "model",
+    "on_missing": "reject"
+  },
+  "cards.action": {
+    "fill": "model",
+    "on_missing": "reject"
+  },
+  "cards.target": {
+    "fill": "model",
+    "on_missing": "warn",
+    "note": "R11 两降：target 去 required（C 档，缺了不影响判分）"
+  },
+  "cards.time_raw": {
+    "fill": "model",
+    "on_missing": "null",
+    "verbatim": true,
+    "null_note": "task-101 二（P331）：没时间信息 = null，不是 reject——「缺省」和「垃圾」是两回事；有值必须能在原文里原样找到（纯剪贴，不许 normalize 改写）"
+  },
+  "cards.time_norm": {
+    "fill": "derived",
+    "on_missing": "null",
+    "derive": "time_norm",
+    "inputs": {
+      "raw": "time_raw"
+    },
+    "note": "可留空，程序按 time_raw + time_ref 归一",
+    "nullable": true,
+    "null_note": "task-101 一（P331）：time_norm 只能由 time_raw 经规则推出；推不出 = null，绝不保留模型自报的精确值（静默造假：去年 -> 2022-01-01）"
+  },
+  "cards.time_precision": {
+    "fill": "derived",
+    "on_missing": "fill",
+    "derive": "time_precision",
+    "inputs": {
+      "raw": "time_raw",
+      "norm": "time_norm"
+    },
+    "nullable": true,
+    "note": "（task-103 R16）原文精度 day/minute/second：day=只有日期或相对日词，time_norm 只到日期、不存 BASE 时刻；没有 time_raw -> null；（task-107 五）有 time_raw 但 time_norm 解不出 => unknown（不是 day/minute，也不是 null）",
+    "enum": [
+      "day",
+      "minute",
+      "second",
+      "unknown"
+    ]
+  },
+  "cards.base_source": {
+    "fill": "derived",
+    "on_missing": "fill",
+    "derive": "base_source",
+    "nullable": true,
+    "note": "task-102 三（R15）：本行相对时间用的基准字段（turn_time/session_time/time_ref）；三级都拿不到则无此键（绝不 now()）（nullable：基准缺失则不写键，程序不猜）"
+  },
+  "cards.base_granularity": {
+    "fill": "derived",
+    "on_missing": "fill",
+    "derive": "base_granularity",
+    "nullable": true,
+    "note": "task-102 三（R15）：基准粒度 turn/session/chunk（三级取最细）（nullable：基准缺失则不写键，程序不猜）"
+  },
+  "cards.time_uncertain": {
+    "fill": "derived",
+    "on_missing": "fill",
+    "derive": "time_uncertain",
+    "inputs": {
+      "raw": "time_raw",
+      "norm": "time_norm"
+    },
+    "note": "task-102 三（R15）：true = 有 time_raw 却推不出 time_norm（含基准缺失）"
+  },
+  "cards.result": {
+    "fill": "model",
+    "on_missing": "reject"
+  },
+  "cards.op_type": {
+    "fill": "model",
+    "on_missing": "reject",
+    "alias": "op_type",
+    "alias_inputs": {
+      "action": "action"
+    },
+    "note": "task-101 三（P331）：模型判 other 时按动作词别名表改判（extract.py OP_TYPE_ALIAS，中英同表）；表里没有的词才留在 other"
+  },
+  "cards.source_chunk_id": {
+    "fill": "derived",
+    "on_missing": "fill",
+    "derive": "source_chunk_id",
+    "note": "不用写，程序填 chunk 号"
+  },
+  "cards.抽取位置": {
+    "fill": "derived",
+    "on_missing": "fill",
+    "derive": "offset_from_quote",
+    "note": "给了能命中的 quote 即可，程序回原文定位"
+  },
+  "cards.quote": {
+    "fill": "model",
+    "on_missing": "warn",
+    "note": "选填；有 抽取位置 的行必须带 quote.原文"
+  },
+  "metrics.指标名": {
+    "fill": "model",
+    "on_missing": "reject"
+  },
+  "metrics.值": {
+    "fill": "model",
+    "on_missing": "reject",
+    "note": "number；空串的行整条丢"
+  },
+  "metrics.单位": {
+    "fill": "model",
+    "on_missing": "warn",
+    "note": "R11 两降：单位 去 required（C 档，不填默认值）"
+  },
+  "metrics.time_raw": {
+    "fill": "model",
+    "on_missing": "null",
+    "verbatim": true,
+    "null_note": "task-101 二（P331）：没时间信息 = null，不是 reject——「缺省」和「垃圾」是两回事；有值必须能在原文里原样找到（纯剪贴，不许 normalize 改写）"
+  },
+  "metrics.time_norm": {
+    "fill": "derived",
+    "on_missing": "null",
+    "derive": "time_norm",
+    "inputs": {
+      "raw": "time_raw"
+    },
+    "note": "可留空，程序按 time_raw + time_ref 归一",
+    "nullable": true,
+    "null_note": "task-101 一（P331）：time_norm 只能由 time_raw 经规则推出；推不出 = null，绝不保留模型自报的精确值（静默造假：去年 -> 2022-01-01）"
+  },
+  "metrics.time_precision": {
+    "fill": "derived",
+    "on_missing": "fill",
+    "derive": "time_precision",
+    "inputs": {
+      "raw": "time_raw",
+      "norm": "time_norm"
+    },
+    "nullable": true,
+    "note": "（task-103 R16）原文精度 day/minute/second：day=只有日期或相对日词，time_norm 只到日期、不存 BASE 时刻；没有 time_raw -> null；（task-107 五）有 time_raw 但 time_norm 解不出 => unknown（不是 day/minute，也不是 null）",
+    "enum": [
+      "day",
+      "minute",
+      "second",
+      "unknown"
+    ]
+  },
+  "metrics.base_source": {
+    "fill": "derived",
+    "on_missing": "fill",
+    "derive": "base_source",
+    "nullable": true,
+    "note": "task-102 三（R15）：同 cards.base_source（nullable：基准缺失则不写键，程序不猜）"
+  },
+  "metrics.base_granularity": {
+    "fill": "derived",
+    "on_missing": "fill",
+    "derive": "base_granularity",
+    "nullable": true,
+    "note": "task-102 三（R15）：同 cards.base_granularity（nullable：基准缺失则不写键，程序不猜）"
+  },
+  "metrics.time_uncertain": {
+    "fill": "derived",
+    "on_missing": "fill",
+    "derive": "time_uncertain",
+    "inputs": {
+      "raw": "time_raw",
+      "norm": "time_norm"
+    },
+    "note": "task-102 三（R15）：同 cards.time_uncertain"
+  },
+  "metrics.time_ref": {
+    "fill": "derived",
+    "on_missing": "null",
+    "derive": "time_ref",
+    "nullable": true,
+    "note": "程序填本行可用的最细基准（turn>session>chunk）；三级都没有 -> null（R15）"
+  },
+  "metrics.source_chunk_id": {
+    "fill": "derived",
+    "on_missing": "fill",
+    "derive": "source_chunk_id",
+    "note": "不用写，程序填 chunk 号"
+  },
+  "metrics.event_id": {
+    "fill": "derived",
+    "on_missing": "fill",
+    "derive": "fk_event_id",
+    "nullable": true,
+    "inputs": {
+      "pos": "抽取位置"
+    },
+    "note": "R14：可选。无父事件时 event_id 记 null（不硬造外键、不写占位串），锚点用 source_chunk_id + 抽取位置；nullable 与 schema 的 required 必须一致"
+  },
+  "metrics.抽取位置": {
+    "fill": "derived",
+    "on_missing": "fill",
+    "derive": "offset_from_quote",
+    "note": "给了能命中的 quote 即可，程序回原文定位"
+  },
+  "metrics.quote": {
+    "fill": "model",
+    "on_missing": "warn",
+    "note": "选填；有 抽取位置 的行必须带 quote.原文"
+  },
+  "identities.名称": {
+    "fill": "model",
+    "on_missing": "reject"
+  },
+  "identities.完整原文写法": {
+    "fill": "model",
+    "on_missing": "reject"
+  },
+  "identities.类型": {
+    "fill": "model",
+    "on_missing": "reject",
+    "enum": [
+      "文件",
+      "版本",
+      "仓库",
+      "工具",
+      "模型",
+      "其他"
+    ],
+    "note": "R12（task-67，取代 P210）：enum 加「模型」，此处是 schema.类型.enum 的镜像，load_rules 会核对两边逐项一致；扩枚举=扩闸覆盖，检查逻辑不动"
+  },
+  "identities.canonical_id": {
+    "fill": "derived",
+    "on_missing": "null",
+    "derive": "canonical_from_raw_writing",
+    "inputs": {
+      "raw": "完整原文写法"
+    },
+    "note": "（task-107 一）程序按 完整原文写法 查别名表：只有表里登记过的写法才算 canonical_id；查不到 => null + unresolved=true（不许原样存档）",
+    "nullable": true,
+    "null_note": "别名表里没有就写 null（查不到就说不认识，不许原样存档）"
+  },
+  "identities.event_id": {
+    "fill": "derived",
+    "on_missing": "fill",
+    "derive": "fk_event_id",
+    "nullable": true,
+    "inputs": {
+      "pos": "抽取位置"
+    },
+    "note": "R12（task-70，取代 P217①）：可选。程序按 mention 处理——名称提及没有唯一源事件时就不写 event_id（不硬造外键、不写占位串），锚点用 source_chunk_id + 抽取位置 + quote；nullable 与 schema 的 required 必须一致（一致性 check：nullable ⇒ 非 required）"
+  },
+  "identities.source_chunk_id": {
+    "fill": "derived",
+    "on_missing": "fill",
+    "derive": "source_chunk_id",
+    "note": "不用写，程序填 chunk 号"
+  },
+  "identities.抽取位置": {
+    "fill": "derived",
+    "on_missing": "fill",
+    "derive": "offset_from_quote",
+    "note": "给了能命中的 quote 即可，程序回原文定位"
+  },
+  "identities.quote": {
+    "fill": "model",
+    "on_missing": "warn",
+    "note": "选填；有 抽取位置 的行必须带 quote.原文"
+  },
+  "facts.左值指标名": {
+    "fill": "model",
+    "on_missing": "reject"
+  },
+  "facts.等式": {
+    "fill": "model",
+    "on_missing": "reject"
+  },
+  "facts.event_id": {
+    "fill": "derived",
+    "on_missing": "fill",
+    "derive": "fk_event_id",
+    "nullable": true,
+    "inputs": {
+      "pos": "抽取位置"
+    },
+    "note": "R14：可选。fact 可独立于事件存在——无父事件时 event_id 记 null（不硬造外键、不写占位串），锚点用 source_chunk_id + 抽取位置；nullable 与 schema 的 required 必须一致"
+  },
+  "facts.source_chunk_id": {
+    "fill": "derived",
+    "on_missing": "fill",
+    "derive": "source_chunk_id",
+    "note": "不用写，程序填 chunk 号"
+  },
+  "facts.抽取位置": {
+    "fill": "derived",
+    "on_missing": "fill",
+    "derive": "offset_from_quote",
+    "note": "给了能命中的 quote 即可，程序回原文定位"
+  },
+  "facts.quote": {
+    "fill": "model",
+    "on_missing": "warn",
+    "note": "选填；有 抽取位置 的行必须带 quote.原文"
+  },
+  "_identity_alias": {
+    "_note": "task-104 三：别名 -> canonical_id -> 规范名，中英同一张表；每条带 lang + source，来源可追。表里没有的写法退回「原文规范化」旧口径（resolve_canonical）。",
+    "entries": [
+      {
+        "alias": "throughput",
+        "canonical_id": "throughput",
+        "canonical_name": "吞吐量",
+        "lang": "en",
+        "source": "task-104/P342 审查端给的例子（throughput vs 吞吐量、成功次数 vs 通过用例数）"
+      },
+      {
+        "alias": "吞吐量",
+        "canonical_id": "throughput",
+        "canonical_name": "吞吐量",
+        "lang": "zh",
+        "source": "task-104/P342 审查端给的例子（throughput vs 吞吐量、成功次数 vs 通过用例数）"
+      },
+      {
+        "alias": "throughput_qps",
+        "canonical_id": "throughput",
+        "canonical_name": "吞吐量",
+        "lang": "en",
+        "source": "task-104/P342 审查端给的例子（throughput vs 吞吐量、成功次数 vs 通过用例数）"
+      },
+      {
+        "alias": "success_count",
+        "canonical_id": "success_count",
+        "canonical_name": "成功次数",
+        "lang": "en",
+        "source": "task-104/P342 审查端给的例子（throughput vs 吞吐量、成功次数 vs 通过用例数）"
+      },
+      {
+        "alias": "successful_count",
+        "canonical_id": "success_count",
+        "canonical_name": "成功次数",
+        "lang": "en",
+        "source": "task-104/P342 审查端给的例子（throughput vs 吞吐量、成功次数 vs 通过用例数）"
+      },
+      {
+        "alias": "成功次数",
+        "canonical_id": "success_count",
+        "canonical_name": "成功次数",
+        "lang": "zh",
+        "source": "task-104/P342 审查端给的例子（throughput vs 吞吐量、成功次数 vs 通过用例数）"
+      },
+      {
+        "alias": "通过用例数",
+        "canonical_id": "success_count",
+        "canonical_name": "成功次数",
+        "lang": "zh",
+        "source": "task-104/P342 审查端给的例子（throughput vs 吞吐量、成功次数 vs 通过用例数）"
+      }
+    ]
+  },
+  "identities.unresolved": {
+    "fill": "derived",
+    "on_missing": "fill",
+    "derive": "unresolved_from_canonical",
+    "inputs": {
+      "canonical": "canonical_id",
+      "raw": "完整原文写法"
+    },
+    "note": "（task-107 一）canonical_id 为空且原文写法不为空 => true（查不到，标出来）。【P347 补】下游聚合/检索不许静默跳过 unresolved 行：计数 unresolved_rows + 答案带「另有 N 条名称未识别」（aggregate_by_identity / lookup_metric 已接）"
+  }
+}
