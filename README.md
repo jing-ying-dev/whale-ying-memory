@@ -116,7 +116,7 @@ Thinking mode was ablated on DeepSeek 262k single-hop. With reranking and answer
 
 The single-hop 93.2% is the mean of five runs (93/93/93/94/93). One additional run was excluded because a mobile-hotspot connection dropped during store extraction and left the memory store incomplete; re-extraction over a stable connection returned the 93–94% band.
 
-Single-hop baselines come from [MemoryAgentBench (arXiv:2507.05257)](https://arxiv.org/abs/2507.05257). Multi-hop baselines and CAR come from [CAR (arXiv:2606.01435)](https://arxiv.org/abs/2606.01435). Raw multi-hop run outputs are included in [`results/`](results/).
+Single-hop baselines come from [MemoryAgentBench (arXiv:2507.05257)](https://arxiv.org/abs/2507.05257). Multi-hop baselines and CAR come from [CAR (arXiv:2606.01435)](https://arxiv.org/abs/2606.01435). Raw multi-hop and single-hop run outputs are included in [`results/`](results/) (see [`results/README.md`](results/README.md) for the verified numbers and provenance).
 
 <details>
 <summary><strong>LoCoMo results and what they show</strong></summary>
@@ -224,7 +224,7 @@ The answer model is supplied by the host agent/benchmark through an OpenAI-compa
 ├── whaleying/
 │   └── standalone.py       # Standalone CLI (ingest / ask), no benchmark dependency
 ├── assets/                 # README demo and social-preview artwork
-├── results/                # Raw multi-hop benchmark outputs
+├── results/                # Raw benchmark run outputs (multi-hop + single-hop)
 ├── docs/
 │   ├── project-story.md
 │   └── development-cost.md
