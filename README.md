@@ -22,11 +22,23 @@ It is built for the failure cases that plain long context and ordinary RAG handl
 
 ## Demo
 
+The demos query a prebuilt 262k memory store from an agent interface. WhaleYing loads the structured store, retrieves evidence, and sends the relevant evidence to DeepSeek for answering. The timings printed by the system are the original measured timings.
+
+### 1. Single question: retrieve, answer, verify
+
 <div align="center">
-  <img src="assets/whaleying-demo.gif" alt="WhaleYing Memory answering questions from a 262k memory store" width="960">
+  <img src="assets/demo-single-question.gif" alt="Single-question retrieval, answering, timing, and answer-key verification" width="1100">
 </div>
 
-The demo queries a prebuilt 262k memory store from an agent interface. WhaleYing loads the structured store, retrieves evidence for one or several questions, and sends only the relevant evidence to DeepSeek for answering.
+One question is sent to the agent. The interface reports store loading, retrieval, and answer time; the returned answer is then searched in the benchmark answer key to verify that it matches the labeled answer. Playback is accelerated to 1.5×.
+
+### 2. Multiple questions: batch answer, per-question timing, verify every answer
+
+<div align="center">
+  <img src="assets/demo-batch-questions.gif" alt="Batch question answering with per-question timing and verification of every returned answer" width="1100">
+</div>
+
+Three questions are sent in one message. WhaleYing returns the three answers with retrieval and answer time for each question. Each returned answer is then searched in the benchmark answer key to verify all three against their labeled answers. Playback is accelerated to 2×.
 
 ## Why WhaleYing
 
