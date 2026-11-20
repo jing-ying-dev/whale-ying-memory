@@ -11,6 +11,7 @@ venv/
 
 # Generated extraction artifacts
 output/
+out/
 extractor/out/
 extractor/failed/
 *.log
