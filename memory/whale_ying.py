@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-our_system —— 我们的记忆系统（抽取器）接入 MemoryAgentBench 的薄适配。
+whale_ying —— 我们的记忆系统（抽取器）接入 MemoryAgentBench 的薄适配。
 
 1. memorize：把 benchmark 喂来的 chunk **攒起来**，第一次 query 时**并发**交给抽取器 extract()
    （chunk 独立、可并行；改前是逐段串行）。
@@ -19,7 +19,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-# l1test 根：our_system.py -> methods -> MemoryAgentBench -> l1test
+# l1test 根：whale_ying.py -> methods -> MemoryAgentBench -> l1test
 L1TEST = Path(__file__).resolve().parents[2]
 EXTRACTOR_DIR = L1TEST / "抽取器"
 if str(EXTRACTOR_DIR) not in sys.path:
@@ -127,7 +127,7 @@ def _extract_one(agent, context_id, seq, text):
         result = agent.ex.extract(chunk, agent.schema, rules=agent.rules)
         entities = (result or {}).get("entities", {})
     except Exception as e:  # noqa: BLE001
-        print("[our_system] extract failed: %s" % e, file=sys.stderr)
+        print("[whale_ying] extract failed: %s" % e, file=sys.stderr)
         entities = {}
     return entities, time.time() - t0
 
@@ -147,7 +147,7 @@ def _extract_pending(agent):
             try:
                 results[i] = fut.result()
             except Exception as e:  # noqa: BLE001
-                print("[our_system] extract thread failed: %s" % e, file=sys.stderr)
+                print("[whale_ying] extract thread failed: %s" % e, file=sys.stderr)
     for i, (c, r) in enumerate(zip(chunks, results)):
         if r is None:
             continue
@@ -155,7 +155,7 @@ def _extract_pending(agent):
         agent._extract_time += dt
         agent._n_chunks += 1
         _append_entities(agent, entities)
-        print("[our_system] chunk %d extract %.1fs (累计 %.0fs)" %
+        print("[whale_ying] chunk %d extract %.1fs (累计 %.0fs)" %
               (c["seq"] + 1, dt, agent._extract_time), file=sys.stderr)
 
 
@@ -182,7 +182,7 @@ def initialize_our_agent(agent, agent_config=None):
     agent.ex = ex
     agent.schema = ex.load_json(str(SCHEMA_PATH), "schema")
     agent.rules = ex.load_rules(agent.schema, str(RULES_PATH))
-    print("\n[our_system] extractor loaded\n")
+    print("\n[whale_ying] extractor loaded\n")
 
 
 # ---------------- 检索：多字段 BM25（subject 3:1 body）+ 向量 + RRF ----------------
@@ -241,7 +241,7 @@ def _build_retrieval_cache(agent, rows):
             vec_texts = [b or s for s, b in zip(subj_strs, body_strs)]
             ce = agent._emb_model.encode(vec_texts, normalize_embeddings=True)
         except Exception as e:  # noqa: BLE001
-            print("[our_system] vector model failed, fallback to BM25-only: %s" % e,
+            print("[whale_ying] vector model failed, fallback to BM25-only: %s" % e,
                   file=sys.stderr)
             agent._emb_failed = True
     agent._retr_cache = {"n": len(rows), "bm25_s": bm25_s, "bm25_b": bm25_b, "ce": ce}
@@ -270,7 +270,7 @@ def _hybrid_retrieve(agent, message, rows):
             qe = agent._emb_model.encode([message], normalize_embeddings=True)[0]
             vec_sims = ce @ qe
         except Exception as e:  # noqa: BLE001
-            print("[our_system] query encode failed, fallback to BM25-only: %s" % e,
+            print("[whale_ying] query encode failed, fallback to BM25-only: %s" % e,
                   file=sys.stderr)
             cache["ce"] = None
 
@@ -351,7 +351,7 @@ def _llm_rerank(agent, query, rows):
         order = _parse_rank(resp.get("text") or "", len(summaries))
         return [sorted_rows[i] for i in order]
     except Exception as e:  # noqa: BLE001
-        print("[our_system] rerank failed, keep original order: %s" % e, file=sys.stderr)
+        print("[whale_ying] rerank failed, keep original order: %s" % e, file=sys.stderr)
         return list(rows)
 
 
@@ -448,11 +448,11 @@ def _direct_answer(agent, message, final_rows, chain=None):
                     response.usage.prompt_tokens, response.usage.completion_tokens)
         except Exception as e:  # noqa: BLE001
             if attempt < 2:
-                print("[our_system] answer retry %d/3 after %s: %s"
+                print("[whale_ying] answer retry %d/3 after %s: %s"
                       % (attempt + 1, type(e).__name__, str(e)[:120]), file=sys.stderr)
                 time.sleep(10)
                 continue
-            print("[our_system] answer gave up after 3 attempts: %s"
+            print("[whale_ying] answer gave up after 3 attempts: %s"
                   % type(e).__name__, file=sys.stderr)
             return ("", 0, 0)
     return ("", 0, 0)
@@ -501,7 +501,7 @@ def _chat(agent, messages, max_tokens=300, temperature=0.0, json_mode=False):
         return (resp.choices[0].message.content or "",
                 resp.usage.prompt_tokens, resp.usage.completion_tokens)
     except Exception as e:  # noqa: BLE001
-        print("[our_system] chat failed: %s" % e, file=sys.stderr)
+        print("[whale_ying] chat failed: %s" % e, file=sys.stderr)
         return ("", 0, 0)
 
 
@@ -575,7 +575,7 @@ def _iterative_answer(agent, message, retrieval_query, rows, initial_rows, max_r
         if not sub_ans.strip():
             break
         chain.append((fq, sub_ans.strip()))
-        print("[our_system] iter round: %s -> %s" % (fq, sub_ans.strip()), file=sys.stderr)
+        print("[whale_ying] iter round: %s -> %s" % (fq, sub_ans.strip()), file=sys.stderr)
         answer, ain, aout = _direct_answer(agent, message, evidence, chain=chain)
         total_in += ain
         total_out += aout
@@ -593,17 +593,17 @@ def handle_our_agent(agent, message, memorizing, query_id=None, context_id=None)
 
     # query
     start = time.time()
-    # 两阶段分进程跑：阶段2 设 OUR_SYSTEM_STORE_LOAD 直接读已抽好的 store（跳过 DeepSeek 抽取）
-    load_path = os.environ.get("OUR_SYSTEM_STORE_LOAD", "").strip()
+    # 两阶段分进程跑：阶段2 设 WHALE_YING_STORE_LOAD 直接读已抽好的 store（跳过 DeepSeek 抽取）
+    load_path = os.environ.get("WHALE_YING_STORE_LOAD", "").strip()
     if load_path:
         agent.rows = json.load(open(load_path, encoding="utf-8"))
     else:
         _extract_pending(agent)   # 把攒下的 chunk 并发抽完（空则跳过，幂等）
-    # 阶段1：设 OUR_SYSTEM_STORE_SAVE 则抽完即存盘退出（只抽不答）
-    save_path = os.environ.get("OUR_SYSTEM_STORE_SAVE", "").strip()
+    # 阶段1：设 WHALE_YING_STORE_SAVE 则抽完即存盘退出（只抽不答）
+    save_path = os.environ.get("WHALE_YING_STORE_SAVE", "").strip()
     if save_path:
         json.dump(agent.rows, open(save_path, "w", encoding="utf-8"), ensure_ascii=False)
-        print("[our_system] store saved (%d rows) -> %s, exit extract-only"
+        print("[whale_ying] store saved (%d rows) -> %s, exit extract-only"
               % (len(agent.rows), save_path), file=sys.stderr)
         sys.exit(0)
     rows = _fold_latest(agent.rows)
@@ -621,8 +621,8 @@ def handle_our_agent(agent, message, memorizing, query_id=None, context_id=None)
         final_rows = _llm_rerank(agent, retrieval_query, topk_rows)
     retrieval_time = time.time() - start
 
-    # 作答：OUR_SYSTEM_ITERATIVE=1 走 Self-Ask 迭代（多跳）；否则一步作答（回退大头 r1 基线）
-    if os.environ.get("OUR_SYSTEM_ITERATIVE", "").strip() in ("1", "true", "yes") and rows:
+    # 作答：WHALE_YING_ITERATIVE=1 走 Self-Ask 迭代（多跳）；否则一步作答（回退大头 r1 基线）
+    if os.environ.get("WHALE_YING_ITERATIVE", "").strip() in ("1", "true", "yes") and rows:
         answer, input_len, output_len = _iterative_answer(
             agent, message, retrieval_query, rows, final_rows)
     else:
