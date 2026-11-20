@@ -112,6 +112,8 @@ The headline gains decompose into a few measured effects:
 | Answer model (multi-hop 262k) | DeepSeek 48.3% vs gpt-4o-mini 25.3% (model-dependent) |
 | Folding on/off (LoCoMo) | 38.6% (no folding) vs 36.3% (folding); see LoCoMo below |
 
+Thinking mode was also ablated (DeepSeek, 262k single-hop): disabling thinking for reranking and answering cost nothing, and disabling it for extraction cost −1~3pp (90–92% vs 93%), which was re-tested and fell inside the temperature-0.7 single-run noise band. The +29pp gain therefore comes from the deterministic architecture, not from model thinking.
+
 The single-hop 93.2% is the mean of five runs (93/93/93/94/93). One additional run was excluded because a mobile-hotspot connection dropped during store extraction and left the memory store incomplete; re-extraction over a stable connection returned the 93–94% band.
 
 Single-hop baselines come from [MemoryAgentBench (arXiv:2507.05257)](https://arxiv.org/abs/2507.05257). Multi-hop baselines and CAR come from [CAR (arXiv:2606.01435)](https://arxiv.org/abs/2606.01435). Raw multi-hop run outputs are included in [`results/`](results/).
