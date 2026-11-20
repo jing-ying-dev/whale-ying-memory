@@ -73,6 +73,8 @@ flowchart LR
 
 For implementation details and terminology, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
+**Model configuration.** Thinking is disabled across the whole pipeline: extraction uses DeepSeek-flash with `disable_thinking=True`; reranking uses DeepSeek at temperature 0 with thinking disabled; answering disables thinking for DeepSeek models (gpt-4o-mini runs use temperature 0.7, which has no thinking toggle).
+
 ## Benchmark results
 
 All results below use the current system: four-table extraction, supersession/folding, hybrid retrieval, and optional Self-Ask iteration. The metric is **substring exact match** on **MemoryAgentBench · Conflict_Resolution**.
