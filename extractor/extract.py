@@ -1,146 +1,201 @@
 # -*- coding: utf-8 -*-
-"""extract.py — 抽取器（task-63）：把一个 chunk 原文抽成 4 实体 JSON。
+"""extract.py — extractor: turn one source chunk into 4-entity JSON.
 
-    卡片 cards / 数值表 metrics / 标识表 identities / fact 等式句 facts
-    字段一字对齐 schema v6（runs/61/schema.json == runs/60/schema.json 逐字节一致）。
+    Entities: cards / metrics / identities / fact statements (facts).
+    Fields align one-to-one with schema v6.
 
-task-63 三处（审查端定方案 C）：
-  ① quote 从「尽量」改成硬规则：prompt 与守卫同口径（守卫是硬 ExtractError，
-     prompt 说「尽量」会让失败率莫名变高）；给不出能命中的 quote 就别单独成行。
-  ② 方案 C：三表**不填 event_id**，程序按偏移归属（contain / nearest），
-     归属方法 fk_method 记进构建日志（out/build_log.jsonl）；nearest 占比高 = 卡片粒度太粗。
-  ③ max_tokens 两道：deepseek_api 里 finish_reason=="length" 显式抛错；
-     超长 chunk 按段落拆片、逐片独立抽，最后按 schema 唯一键合并去重。
+    Core rules:
+      ① quote is a hard rule: the prompt and the guard use the same definition (the
+        guard is a hard ExtractError; a soft "try your best" would silently inflate the
+        failure rate); a row that cannot produce a matching quote must not be emitted as
+        its own line.
+      ② the three value tables do not fill event_id; the program assigns it by offset
+        (contain / nearest). The assignment method fk_method is recorded in the build log
+        (out/build_log.jsonl); a high nearest share means card granularity is too coarse.
+      ③ two max_tokens guards: deepseek_api raises explicitly when
+        finish_reason=="length"; overlong chunks are split by paragraph and each piece
+        extracted independently, then merged and deduplicated by the schema unique keys.
 
-task-64 四处（LLM 抽取鲁棒性三档 + 空字段 strip + 重试 + 监控；档位清单在 task-65 已移进 rules）：
-  ⑤ 空字段 strip：on_missing=warn 的字段空串在必填校验之前 strip；
-     必填字段是空串 = 报错（不 strip）；数值行的 值 是空串 = 整条丢。
-  ⑥ 三档鲁棒性（判据：「这条数据缺了它，哪类题会答错？」）：
-     A 程序能推的 -> 直接补、不记 warning（derive 指定的算法）；
-     B 推不出且缺了该行没意义 -> 硬拒该片 + 重试该片（上限 2 次）：on_missing=reject 的字段
-       缺失/空串、非法枚举、有偏移但无 quote（含无偏移无 quote）。
-       重试 2 次仍不行 -> 原文+原因落 failed/ 并计数，不许静默丢弃。
-     C 缺了不影响判分 -> 记 warning 容忍：on_missing=warn 的字段为空则 strip。
-   两个监控项：warning 率 = 带 warning 的行 / 总行（<5%）；拒片率 = failed 片 / 总片（<10%）。
-     超阈值不是报警了事：在 warnings 里明确写「回来查 prompt 或拆片」。
-  四、quote 占比 gate 不因重试放宽：最终四表 quote 占比仍须 >= schema.gates.quote_ratio_min，
-     重试只是让模型改正，不是豁免条件。
+Robustness (three tiers) plus empty-field strip, retry, and monitoring:
+  ⑤ empty-field strip: fields with on_missing=warn have empty strings stripped before
+     required-field validation; a required field that is an empty string is an error
+     (not stripped); a numeric row whose value is an empty string is dropped entirely.
+  ⑥ three robustness tiers (criterion: "if this datum is missing, which questions
+     would be answered wrong?"):
+     A program-derivable -> fill directly, no warning (algorithm named by derive);
+     B underivable and the row is meaningless without it -> hard-reject the piece and
+       retry it (up to 2 times): fields with on_missing=reject that are missing/empty,
+       illegal enum values, or have an offset but no quote (including no offset and no
+       quote). After 2 failed retries -> write source+reason to failed/ and count, never
+       drop silently.
+     C missing but harmless to scoring -> warn and tolerate: fields with on_missing=warn
+       that are empty are stripped.
+   two monitoring items: warning rate = rows with warnings / total rows (<5%);
+     reject rate = failed pieces / total pieces (<10%). Exceeding a threshold is not
+     just an alarm: the warnings explicitly say "come back and check the prompt or the
+     split".
+   the quote-ratio gate is not relaxed by retries: the final four-table quote ratio must
+     still be >= schema.gates.quote_ratio_min; retry only lets the model correct itself,
+     it is not an exemption.
 
-task-65 三处（P207 表驱动 + P208 R11 两降一留 + 一致性 check）：
-  ① 表驱动：A/B/C 三档从「代码里三张手写清单」改成「schema 属性表驱动」。schema 旁边的
-     extract_rules.json 按「表.字段」给每个属性两个属性：fill(model|derived) 谁产出、
-     on_missing(fill|reject|warn) 缺了怎么办；程序遍历 schema.entities[*].properties，
-     按属性决定行为，代码里不列字段名。新字段没声明 = schema 错（不给默认值，逼人表态）。
-  ② R11 两降一留：metric.单位 与 card.target 去 required -> on_missing=warn（C 档）；
-     identity.canonical_id 留 required -> on_missing=fill（A 档 derived：程序按「完整原文写法」
-     规范化生成，模型不给）；quote.归一化 维持可选（schema 的 quote.required 只留 原文）。
-     不填默认值（「不知道」不能伪装成「个」）。
-  ③ 一致性 check（治根：required 与 on_missing 两份真相）：reject ⇒ 必须 required；
-     warn ⇒ 必须非 required（task-64 的冲突正是这条）；fill ⇒ required 与否都行。
-     三个红样例（warn 却 required / reject 却非 required / fill 正例）跑在 self_test_61.py。
-  ④ task-66 内容噪声闸（P209）：
-     ① 枚举值当标识名（名称 / 完整原文写法 ∈ 类型枚举值，或 名称==类型）-> 报红 + 丢行 + 计数；
-     ② 同串交叉（同一 chunk 内 标识名 == 卡片 action/target）-> 报红（路由错位，不丢行）；
-     ③ 密度监控只体检（每 chunk 各表行数 + 标识数/千字符，--density-scan 列前 5% chunk 给人看）；
-     ④ 剩下的抽检见 spotcheck.py（每表 5 行、共 20 行，种子+判定留底，标识表错行率 <10% 才继续端到端）。
+Table-driven tiers:
+  ① table-driven: the A/B/C tiers come from schema attributes rather than three
+     hand-written lists in code. extract_rules.json (next to the schema) gives each
+     attribute two properties per "table.field": fill(model|derived) for who produces
+     it, and on_missing(fill|reject|warn) for what to do when it is missing; the program
+     iterates schema.entities[*].properties and behaves per attribute, with no field
+     names hard-coded in code. A new field that is undeclared is a schema error (no
+     default, forcing an explicit decision).
+  ② metric.单位 and card.target drop required -> on_missing=warn (tier C);
+     identity.canonical_id stays required -> on_missing=fill (tier A derived: the
+     program normalizes the full original wording; the model does not supply it);
+     quote.归一化 stays optional (schema's quote.required keeps only 原文). No defaults
+     ("unknown" must not masquerade as a concrete value).
+  ③ consistency check (single source of truth for required vs on_missing):
+     reject ⇒ must be required; warn ⇒ must be non-required; fill ⇒ either way. The
+     three red examples (warn-but-required / reject-but-not-required / fill positive)
+     run in self_test_61.py.
+  ④ content-noise gates:
+     ① an enum value used as an identifier name (名称 / 完整原文写法 ∈ the type enum
+       values, or 名称==类型) -> red + drop the row + count;
+     ② same-string cross (within one chunk an identifier name == a card action/target)
+       -> red (routing mismatch, row kept);
+     ③ density monitoring is inspection only (per-chunk table row counts + identifiers
+       per thousand chars; --density-scan lists the top 5% chunks for review);
+     ④ the remaining spot checks live in spotcheck.py (5 rows per table, 20 total, seed
+       and verdict kept; identity-table error rate <10% before end-to-end).
 
-task-67 三处（P210 审查：类型枚举不全 / 纯标识符误判动作 / fk_method 丢粒度）：
-  ① 类型枚举加「模型」（R12）：schema 与 extract_rules.json 同步；扩枚举 = 扩闸覆盖，
-     检查逻辑不动（枚举值闸自动吃到 模型 这个值）。留痕「取代 P210」。
-  ② 形态闸：卡片的 action / target 若匹配「纯标识符形态」（^[a-z][a-z0-9_]*(\\.[a-z0-9_]+)*$ 或带 ()）
-     且不含中文 -> 记 warning「疑似把标识当动作」。只报警不丢行（形态规则，不是黑名单）。
-  ③ fk_method 补每行明细：每行 where + pos + method + 挂到哪张卡（card_pos/card_quote）
-     + delta，全部落 build_log 的 fk_method.detail；nearest_ratio > 0.3 报警时把
-     nearest 行的明细一并写进 warning。
+Further refinement:
+  ① type enum gains 模型: schema and extract_rules.json stay in sync; widening the
+     enum widens the gate coverage, and the check logic is unchanged (the enum-value
+     gate picks up the new value automatically).
+  ② shape gate: a card's action / target matching "pure identifier shape"
+     (^[a-z][a-z0-9_]*(\\.[a-z0-9_]+)*$ or with ()) and containing no CJK -> warn
+     "identifier mistaken for an action". Warn only, do not drop (a shape rule, not a
+     blacklist).
+  ③ fk_method records per-row detail: each row's where + pos + method + which card it
+     attached to (card_pos/card_quote) + delta, all in build_log fk_method.detail; when
+     nearest_ratio > 0.3 the nearest-row detail is also written into the warning.
 
-task-68（P211 审查：显式归属为主、偏移兜底；source grounding 要求值与出处同一次产出）：
-  ① prompt 给三表每行加临时字段「关联事件位置」= 该行所属事件的卡片 抽取位置（整数）。
-     字段声明在 extract_rules.json 的 _temp_fields（fill=model / on_missing=warn），
-     不在 schema：程序读完就 pop，不落最终产物（keep_known_fields 之前 pop，check_0 照验）。
-  ② 归属顺序改成 explicit -> contain -> nearest：关联事件位置 命中某张卡片的 抽取位置
-     -> fk_method="explicit"；否则按 task-63/67 的 contain -> nearest 回落。
-  ③ 判据：explicit 覆盖率 >= 80%、nearest_ratio < 0.1，达不到各报一条 warning（都是 chunk
-     级提示，不算行级 warning 率）；nearest 行标低置信（confidence=low），跨表 join 只允许
-     explicit/contain 的行作答——answer_rows 的统计落 fk.answer 与 build_log.fk_method.answer。
+Explicit attribution with offset fallback:
+  ① the prompt adds a temporary field 关联事件位置 to each row of the three tables:
+     the integer extraction position of the card the row belongs to. It is declared in
+     extract_rules.json _temp_fields (fill=model / on_missing=warn), not in the schema;
+     the program pops it after reading (popped before keep_known_fields, check_0 still
+     verifies), so it never reaches the final output.
+  ② attribution order becomes explicit -> contain -> nearest: 关联事件位置 hits a
+     card's extraction position -> fk_method="explicit"; otherwise fall back to
+     contain -> nearest.
+  ③ criterion: explicit coverage >= 80%, nearest_ratio < 0.1; each miss reports a
+     warning (chunk-level hints, not row-level warning rate); nearest rows are marked
+     low confidence (confidence=low), and cross-table join only answers with
+     explicit/contain rows — the answer_rows statistics land in fk.answer and
+     build_log.fk_method.answer.
 
-task-69（P215 五条：事件序号锚点——字段名带「位置」会诱导 LLM 填值自己的偏移）：
-  ① 临时字段改名「所属事件序号」（去掉「位置」这个诱导词），三表每行填整数序号；
-  ② prompt 给一正一反两个例子，反例贴真数 1816（真调用里模型填的就是值自己的偏移）；
-  ③ 序号是程序派生值：prompt 要求 cards 按事件在原文出现顺序输出，程序按 抽取位置 升序
-     排 cards 并编号 1..n；LLM 原始顺序不是升序时记 reorder=true（不信任它的顺序）；
-  ④ 序号越界（不在 1..n）/ 不是整数 -> hint_invalid 计数 + warning，不静默回落；
-     「给错」与「没给」分开数（hint_ok / hint_invalid / hint_missing 三格）；
-  ⑤ 判据不变：explicit 覆盖率 >= 0.8、hint_invalid 单独报数；
-     explicit 上来了但 hint_invalid 也高 = LLM 数事件个数吃力（n 太大），回来查卡片切分。
+Event-sequence anchor:
+  ① the temporary field is renamed 所属事件序号 (dropping the misleading word 位置),
+     and the three tables fill an integer sequence number per row;
+  ② the prompt gives one positive and one negative example; the negative example uses
+     the real number 1816 (what the model actually filled: the value's own offset);
+  ③ the sequence number is program-derived: the prompt asks cards to be output in
+     order of appearance, the program sorts cards by extraction position ascending and
+     numbers them 1..n; when the LLM's original order is not ascending, reorder=true is
+     recorded (its order is not trusted);
+  ④ an out-of-range (not in 1..n) / non-integer number -> hint_invalid count + warning,
+     not a silent fallback; "wrong" and "missing" are counted separately
+     (hint_ok / hint_invalid / hint_missing);
+  ⑤ criterion unchanged: explicit coverage >= 0.8, hint_invalid reported separately;
+     explicit up but hint_invalid also high = the LLM struggles to count events (n too
+     large); come back and check the card split.
 
-task-70（P217：17 行非 explicit 里混了两种东西，必须拆开；四件）：
-  ① 拆两种 fk_method，不再混成一个 nearest：
-     - aggregate = metrics/facts 的派生汇总量（总数/次数/占比/派生值）：天然无单一源事件，
-       指向「该 chunk 的汇总段」（anchor=chunk_summary，外键取汇总段最近的卡片）；
-     - mention   = identities 的名称提及：锚点是 source_chunk_id + 抽取位置 + quote，
-       **不是某个事件**（标识与事件是多对多）；
-     - 跨表 join 仍只用 explicit / contain 的行作答。
-  ② R12：identities.event_id 改可选（schema 去掉 required，rules 记 on_missing=fill +
-     nullable=true）：缺省用 source_chunk_id + 抽取位置 + quote 定位，程序按 mention 处理、
-     不硬造外键。metrics/facts 的 event_id 外键不变（一对一，explicit/contain 关联）。
-  ③ 覆盖率分母分表算：metrics/facts = explicit / (rows − aggregate_rows)；
-     identities 单独看 mention 覆盖率（有 quote 且能定位就算），不进 explicit 的分母。
-     合并算的比例没意义，不再输出。
-  ④ .bak 形态闸：完整原文写法 以 . 开头（纯扩展名）或是纯后缀词 -> warning「疑似通称不具名」
-     （只报警不丢行）。
+Split two fk_method kinds (the non-explicit rows mix two things; four items):
+  ① split fk_method, no longer one "nearest":
+     - aggregate = derived totals in metrics/facts (total/count/share/derived values):
+       naturally no single source event, points at "this chunk's summary segment"
+       (anchor=chunk_summary, foreign key takes the nearest card of the summary segment);
+     - mention   = name mentions in identities: anchored by source_chunk_id + extraction
+       position + quote, not an event (identities and events are many-to-many);
+     - cross-table join still only answers with explicit / contain rows.
+  ② R12: identities.event_id becomes optional (schema drops required, rules record
+     on_missing=fill + nullable=true): default locates by source_chunk_id + extraction
+     position + quote, the program treats it as mention and does not fabricate a foreign
+     key. metrics/facts event_id is unchanged (one-to-one, explicit/contain).
+  ③ coverage denominators are per-table: metrics/facts = explicit / (rows −
+     aggregate_rows); identities looks at mention coverage separately (has a quote and
+     is locatable counts), and does not enter the explicit denominator. The merged ratio
+     is meaningless and no longer reported.
+  ④ .bak shape gate: 完整原文写法 starting with . (pure extension) or a pure suffix
+     word -> warning "likely a generic term, not a name" (warn only, no drop).
 
-task-71（P218 两处：空分母不许报 100%；answer_rows 要与 explicit_ratio 并列当判据）：
-  ① 空分母不报 100%：某表 denominator=0（全是 aggregate，或空表）时比值写 null（N/A），
-     不再写 1.0。报告里单列 vacuous_tables（空分母表）计数，这些表**不进总体达标分母**
-     ——达标只看 scored_tables（有分母的表）。一张全是汇总值的 chunk 不会再显示「explicit 100%」。
-  ② answer_rows 与 explicit_ratio 并列：answer_rows = explicit + contain 的行数（真的能拿去
-     跨表 join 的行）；报告里单列 fk.answer.answer_rows / answer_ratio，并加判据——
-     answer_rows < FK_ANSWER_ROWS_MIN 或 answer_ratio < FK_ANSWER_RATIO_MIN 就 warning
-     fk_answer_rows_low。覆盖率达标 ≠ 能答题（aggregate/mention 不进 answer）。
+Empty-denominator and answer_rows criteria:
+  ① an empty denominator is not 100%: when a table's denominator=0 (all aggregate, or
+     empty table) the ratio is null (N/A), not 1.0. The report lists vacuous_tables
+     (empty-denominator tables) separately; these tables do not enter the overall
+     passing denominator — only scored_tables (tables with a denominator) count. A
+     chunk that is all summary values no longer shows "explicit 100%".
+  ② answer_rows alongside explicit_ratio: answer_rows = explicit + contain rows (rows
+     that can actually be used for cross-table join); the report lists
+     fk.answer.answer_rows / answer_ratio separately, plus the criterion —
+     answer_rows < FK_ANSWER_ROWS_MIN or answer_ratio < FK_ANSWER_RATIO_MIN warns
+     fk_answer_rows_low. Coverage passing ≠ answerable (aggregate/mention do not enter
+     answer).
 
-task-72（P219/P220：LLM 抽取在抖、日志两份真相、单边比例当不成对覆盖）：
-  ① 稳定性：同一个 chunk 重复跑 N 次（默认 3，`--repeat`），temperature 固定 0
-     （deepseek_api.call 的默认值，不传别的）；对 rows / explicit / nearest / answer_rows
-     报中位数与区间 [min, max]；区间半宽 > ±10% 的指标标 unstable，**只当体检、不当判据**
-     （role=health_only），稳定的才 role=judge。单次达标不算闭环。
-  ② 落盘：build_log 支持 `--log-dir` 指定目录（含 --out 产物同目录即可一处可查）；
-     每次运行把 out / log / repeat 一起写进日志条目，日志在哪不再靠口头约定。
-  ③ 成对覆盖：跨表 join 要的是「某事件 + 它的那条数据行同时出现在 answer 里」，
-     `answer_rows / rows` 只是单边行占比。`--answer-index` 落每行作答方法，
-     `--pair-check questions.json --answer-index ai.json` 逐题验这对成不成对；
-     答不了 = 关联问题（行挂在别的 event_id / 行本身是 aggregate/mention），不是比例问题。
+Stability, logging, and pairwise coverage:
+  ① stability: the same chunk runs N times (default 3, --repeat), temperature fixed at
+     0 (deepseek_api.call's default); rows / explicit / nearest / answer_rows report
+     median and range [min, max]; metrics whose half-range exceeds ±10% are marked
+     unstable, as health-only (role=health_only), and only stable ones are role=judge. A
+     single passing run is not a closed loop.
+  ② logging: build_log supports --log-dir (pointing it at the --out directory keeps
+     everything in one place); every run writes out / log / repeat into the log entry, so
+     the log location is no longer an oral convention.
+  ③ pairwise coverage: cross-table join needs "an event + its data row both present in
+     answer"; answer_rows / rows is only a one-sided row share. --answer-index records
+     each row's answer method, and --pair-check questions.json --answer-index ai.json
+     verifies each question's pair; unanswerable means a linking problem (row attached
+     to another event_id / row is itself aggregate/mention), not a ratio problem.
 
-task-75（P225 收尾两件：拆片参数进日志、跨配置可比指标）：
-  ① 单片上限进配置 + 日志留证：MAX_CHUNK_CHARS 6000 -> 1200（环境变量 DEEPSEEK_MAX_CHUNK_CHARS
-     覆盖），build_log 每条显式记 max_chunk_chars / pieces / split_on（none / line_boundary /
-     line_boundary+hard_cut）。参数变是一次「可解释的 sha 变化」——日志里必须查得到，不再靠口头。
-  ② 跨配置可比指标（写进 runs/61/抽取规程.md）：拆片 = 调用次数 ×2，
-     所以「密度更高」必须与「成本翻倍」成对报——
-       每千字产出 = 各表行数 / (chunk 字符数 / 1000)
-       每千字调用 = 调用次数 / (chunk 字符数 / 1000)
-     例：不拆 1.9 个/千字、1 次调用 vs 拆片 5.8 个/千字、2 次调用 = 密度 3 倍、成本 2 倍。
+Split-parameter logging and cross-config metrics:
+  ① per-piece limit into config + log evidence: MAX_CHUNK_CHARS 6000 -> 1200 (env
+     DEEPSEEK_MAX_CHUNK_CHARS overrides), build_log records max_chunk_chars / pieces /
+     split_on (none / line_boundary / line_boundary+hard_cut) per entry. A parameter
+     change is an "explainable sha change" — it must be discoverable in the log, not by
+     oral convention.
+  ② cross-config comparable metrics: splitting = calls ×2, so "higher density" must be
+     reported paired with "doubled cost" —
+       output per thousand chars = table rows / (chunk chars / 1000)
+       calls per thousand chars = calls / (chunk chars / 1000)
+     e.g. no split 1.9/thousand chars, 1 call vs split 5.8/thousand chars, 2 calls =
+     density 3x, cost 2x.
 
-task-76（P226 三件：1200 档真实夹具进主回归、成本字段、warning 红信号）：
-  ① fixtures/real1200（1800~2200 字、真实体量）+ meta.json 自报 max_chunk_chars，进主回归集；
-  ② density 增加成本侧 `calls_per_1k_chars = pieces / chars × 1000`（与每千字产出成对）；
-  ③ warning_rate=0.0909 的红信号查清是夹具构造（prompt74/missing3 故意抽掉 3 行 quote，
-     3/33 行 warning）而不是 6000 档的真实问题 —— 说明写进 data。
+Cost field and fixtures:
+  ① fixtures/real1200 (1800~2200 chars, real volume) + meta.json self-reports
+     max_chunk_chars, in the main regression set;
+  ② density gains the cost side calls_per_1k_chars = pieces / chars × 1000 (paired with
+     output per thousand chars);
+  ③ the warning_rate=0.0909 red signal was confirmed to be fixture construction
+     (prompt74/missing3 deliberately drops 3 rows of quote, 3/33 rows warn), not a real
+     problem of the 6000 tier — this explanation goes into the data.
 
-调用面：
-    默认调 deepseek_api.call(prompt)；--replay 用给定响应文本代替模型（离线自测/回归用，
-    走的仍是同一条 build_prompt -> parse -> normalize 流水线，不跳过校验）。
-    --replay 也接受 {"pieces": ["<第1片响应>", "<第2片响应>", ...]}，用于拆片用例；
-    task-64 追加 {"attempts": {"<片号1起>": ["<第1次响应>", "<第2次响应>", ...]}}，用于重试用例
-    （该片按 attempts 给出的完整序列逐次取；没给第 N 次响应就重放最后一次，模拟「模型卡住」）。
+Calling:
+     default calls deepseek_api.call(prompt); --replay substitutes a given response text
+     for the model (offline self-test/regression, still through the same build_prompt ->
+     parse -> normalize pipeline, no validation skipped).
+     --replay also accepts {"pieces": ["<piece 1 response>", "<piece 2 response>", ...]}
+     for split-piece cases;
+     append {"attempts": {"<piece no. from 1>": ["<1st response>", "<2nd response>", ...]}}
+     for retry cases (the piece takes the full sequence in order; a missing Nth response
+     replays the last one, simulating a "stuck model").
 
-用法:
+Usage:
     py -3 extract.py --chunk fixtures/pass/chunk.json --out out/entities.json
     py -3 extract.py --chunk ... --replay fixtures/pass/llm_response.json --out ...
-    py -3 extract.py --chunk ... --dry-run          # 只打印 prompt 摘要，不调模型
+    py -3 extract.py --chunk ... --dry-run          # print a prompt summary, don't call the model
     py -3 extract.py --chunk ... --dump-prompt p.txt
-    py -3 extract.py --density-scan out/build_log.jsonl   # task-66 ③ 只体检，不抽卡
+    py -3 extract.py --density-scan out/build_log.jsonl   # inspection only, no extraction
 
-退出码: 0 = 抽取并校验通过；1 = 抽取/校验失败（消息写 stderr）；2 = 用法/IO 错误。
+Exit code: 0 = extracted and validated; 1 = extraction/validation failed (message to
+stderr); 2 = usage/IO error.
 """
 import argparse
 import hashlib
@@ -160,11 +215,11 @@ if hasattr(sys.stderr, "reconfigure"):
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-import deepseek_api  # noqa: E402  (必须能在同目录找到)
+import deepseek_api  # noqa: E402  (must be importable from this directory)
 
 DEFAULT_SCHEMA = HERE / "schema.json"
 ISO_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+08:00$")
-# task-103 一：time_norm 的两种合法写法——day 精度**只到日期**，不带时刻。
+# The two valid time_norm forms — day precision carries a date only, no clock time.
 DAY_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 TIME_NORM_PATTERN = re.compile(
     r"^(\d{4}-\d{2}-\d{2}|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+08:00)$")
@@ -172,7 +227,8 @@ TIME_PRECISION_VALUES = ("day", "minute", "second")
 
 
 def _load_dateparser():
-    """task-102 二：相对时间换 dateparser（pip 装不进系统目录，装在 工作区/vendor/）。"""
+    """Relative-time parsing uses dateparser (it cannot install into the system directory,
+    so it lives in the workspace vendor/ directory)."""
     try:
         import dateparser  # noqa: F401
         return dateparser
@@ -192,83 +248,96 @@ def _load_dateparser():
 DATEPARSER = _load_dateparser()
 WS_CHARS = " \t\r\n\u3000\u00a0\ufeff\u200b"
 
-# task-65 ①：A/B/C 三档的行为由 schema 旁边的 extract_rules.json 决定（表驱动，P207）。
-# 本文件不再列任何「哪个字段属于哪档」的清单；每个 schema 属性必须在 rules 里显式声明
-# fill / on_missing（没有默认值，没声明就是 schema 错）。
+# The A/B/C tier behavior is driven by extract_rules.json next to the schema (table-driven).
+# This file no longer lists which field belongs to which tier; every schema attribute must
+# explicitly declare fill / on_missing (no defaults — undeclared is a schema error).
 RULES_NAME = "extract_rules.json"
 DEFAULT_RULES = HERE / RULES_NAME
 FILL_VALUES = ("model", "derived")
 ON_MISSING_VALUES = ("fill", "reject", "warn", "null")
 
-# task-64 B 档：一片最多重试 2 次（总尝试 3 次）；可用 DEEPSEEK_RETRY_MAX 覆盖。
+# Tier B: a piece is retried at most 2 times (3 total attempts); overridable via DEEPSEEK_RETRY_MAX.
 MAX_RETRIES = 2
-# task-64 三、两个监控项阈值
+# The two monitoring thresholds
 WARNING_RATE_MAX = 0.05
 REJECT_RATE_MAX = 0.10
 
 
 def gate_verdict(den, value, max_value):
-    """task-104 五（P342）：闸的判定必须同时看 (分子, 分母)。
+    """A gate verdict must consider both (numerator, denominator).
 
-    分母 = 0 => "unverified"（未检验）——**绝不 return "pass"**：没有样本的闸是空转的闸，
-    把它显示成绿就是「零样本也算通过」的盲区（rows_checked=0、null_rows=33 也显示绿就是这个坑）。
-    分母 > 0 才可能 pass / fail。
+    denominator = 0 => "unverified" — never return "pass": a gate with no samples is a
+    gate that is not actually tested; showing it green is the "zero samples counts as
+    passing" blind spot (rows_checked=0, null_rows=33 also shows green for this reason).
+    Only a denominator > 0 can be pass / fail.
     """
     if not den:
         return "unverified"
     if value is None:
         return "unverified"
     return "pass" if value < max_value else "fail"
-# task-68 ③ / task-69 ③：判据（explicit 为主、序号锚点）——explicit 覆盖率下限；
-# nearest 占比上限 FK_NEAREST_RATIO_MAX 定义在 FkResolver 附近（与报警文案同处，便于一处改）。
+# Criterion (explicit-first, sequence anchor) — the explicit coverage lower bound;
+# the nearest upper bound FK_NEAREST_RATIO_MAX is defined near FkResolver (co-located
+# with its warning text so both change in one place).
 FK_EXPLICIT_RATIO_MIN = 0.8
-# task-71 ②：answer_rows 与 explicit_ratio 并列当判据——覆盖率达标 ≠ 能答题。
-# 跨表 join 题的前提是「相关事件与数据行都在 answer 里」；aggregate/mention 不进答案，
-# 所以一条 chunk 可能覆盖率 100% 却只剩个位数的行能 join。两个阈值都是拍的（与上面同风格），
-# 宁可多报一声，也不让「覆盖率好看、其实没法答题」的 chunk 静默过关。
-FK_ANSWER_ROWS_MIN = 4        # 绝对下限：answer 行少于此数，跨表 join 基本没得答
-FK_ANSWER_RATIO_MIN = 0.5     # 相对下限：answer_rows / 三表总行数（rows 为 0 时不判）
+# answer_rows is judged alongside explicit_ratio — coverage passing != answerable.
+# A cross-table join question requires "the relevant event and data row are both in
+# answer"; aggregate/mention rows do not enter the answer, so a chunk can be at 100%
+# coverage yet have only a handful of joinable rows. Both thresholds are hand-picked
+# (same style as above): prefer an extra warning over silently passing a chunk that
+# "looks covered but is actually unanswerable".
+FK_ANSWER_ROWS_MIN = 4        # absolute floor: fewer answer rows means the join has almost nothing to answer
+FK_ANSWER_RATIO_MIN = 0.5     # relative floor: answer_rows / total rows across the three tables (not judged when rows is 0)
 
-# task-72 ①：稳定性体检。同一 chunk 重复跑 STABILITY_REPEATS 次（temperature 固定 0），
-# 报中位数 + 区间；区间半宽 (max−min)/2/median 超过 STABILITY_TOLERANCE 就标 unstable。
-# task-72 ③：稳定性指标固定看这四个（单边行数 / 归属质量 / 能答的行数）。
+# Stability check: run the same chunk STABILITY_REPEATS times (temperature fixed 0),
+# report median + range; a metric whose half-range (max−min)/2/median exceeds
+# STABILITY_TOLERANCE is marked unstable.
+# Stability metrics are fixed to these four (one-sided row count / attribution quality /
+# answerable row count).
 STABILITY_REPEATS = 3
 STABILITY_TOLERANCE = 0.10
 STABILITY_METRICS = ("rows", "explicit", "nearest", "answer_rows")
 
-# task-70 ①（P217）：非 explicit 的行混了两种东西，必须分开记，不再统一叫 nearest：
-#   aggregate = metrics/facts 的派生汇总量（总数/次数/占比/派生值）：天然没有单一源事件，
-#               指向「该 chunk 的汇总段」（记锚点 anchor=chunk_summary，外键取该段最近的卡片，
-#               只为让 metrics/facts 的 event_id 外键仍非空、check_0 仍可验）；
-#   mention   = identities 的名称提及：锚点是 source_chunk_id + 抽取位置 + quote，**不是某个事件**
-#               （标识与事件是多对多，R12 让 identities.event_id 可选，程序不硬造外键）。
+# Non-explicit rows mix two things and must be recorded separately, no longer a single "nearest":
+#   aggregate = derived totals in metrics/facts (total/count/share/derived value): naturally
+#               no single source event, points at "this chunk's summary segment" (anchor
+#               anchor=chunk_summary, foreign key takes the nearest card of that segment,
+#               only so metrics/facts still has a non-null event_id that check_0 can verify);
+#   mention   = name mentions in identities: anchored by source_chunk_id + extraction
+#               position + quote, not an event (identities and events are many-to-many;
+#               R12 makes identities.event_id optional, the program does not fabricate a key).
 FK_METHOD_AGGREGATE = "aggregate"
 FK_METHOD_MENTION = "mention"
-# task-70 ②：跨表 join 只用 explicit / contain 的行作答（aggregate/mention 不进答案）。
+# Cross-table join only answers with explicit / contain rows (aggregate/mention do not answer).
 ANSWER_METHODS = ("explicit", "contain")
-# 临时字段的「角色」标记：fk_hint = 三表行用来显式指定所属事件（task-69 用「所属事件序号」，
-# 序号由程序按 抽取位置 升序编号 1..n；LLM 不在卡片里写序号，少一个能写错的地方）。
+# The "role" marker of a temporary field: fk_hint = the three tables use it to explicitly
+# name the owning event (the sequence is program-numbered 1..n by extraction position;
+# the LLM does not write the number into cards, removing one more place to get it wrong).
 TEMP_ROLE_FK_HINT = "fk_hint"
 FAILED_DIR = HERE / "failed"
 
-# task-63 ③：单次请求的输入上限（字符）。16000 只是把线往后挪，更长照样撞 max_tokens。
-# task-75（P225）：默认从 6000 降到 1200——审查端定的口径是「单片上限 <=1200」，
-# 这样「拆片 vs 不拆片」才可比（今晚绕圈正是因为 prompt sha 变了、日志看不出是拆片参数变了）。
-# 上限是**配置**不是魔法常量：生效值一律走 max_chunk_chars()（DEEPSEEK_MAX_CHUNK_CHARS 覆盖，
-# 非法/<=0 回落本默认值），并逐次写进 build_log 的 max_chunk_chars / pieces / split_on。
+# Input limit per request (in characters). 16000 only moves the line; longer still hits max_tokens.
+# The default was lowered from 6000 to 1200 — the agreed spec is "per-piece limit <=1200",
+# so that "split vs no split" is comparable (the loop earlier came from a changed prompt sha
+# with no log showing the split parameter had changed).
+# The limit is config, not a magic constant: the effective value always goes through
+# max_chunk_chars() (DEEPSEEK_MAX_CHUNK_CHARS overrides, illegal/<=0 falls back to this
+# default), and is written per run into build_log's max_chunk_chars / pieces / split_on.
 MAX_CHUNK_CHARS = 1200
 
 BUILD_LOG = HERE / "out" / "build_log.jsonl"
-# task-107 三：端到端断言清单（字段新增必配一条，见 QUERY_FIELD_CONTRACT）
+# End-to-end assertion list (every new field must ship with an assertion; see QUERY_FIELD_CONTRACT)
 E2E_ASSERTS_PATH = HERE / "e2e_asserts.json"
 
 
 class ExtractError(RuntimeError):
-    """抽取失败：模型输出不合契约 / 字段非法 / 外键无法归属。消息直接给人看。"""
+    """Extraction failed: model output violates the contract / illegal field / foreign key
+    cannot be attributed. The message is meant to be read directly."""
 
 
 class PieceRejected(ExtractError):
-    """task-64 B 档：该片输出推不出、缺了该行没意义 -> 硬拒该片，触发「重试该片」。"""
+    """Tier B: this piece's output is underivable and the row is meaningless without it
+    -> hard-reject the piece, triggering "retry this piece"."""
 
 
 def max_retries():
@@ -283,12 +352,16 @@ def max_retries():
     return MAX_RETRIES
 
 
-# ---------------------------------------------------------------- 留痕：warning 采集
+# ---------------------------------------------------------------- warning collection
 #
-# warnings 统一存 dict：{"piece": 片号或 None, "where": 行定位或 None, "code": 分类, "msg": 人话}
-#   * where 非空 = 行级 warning（进 warning 率分子；同一行多条只算一行）
-#   * where 为空 = chunk 级提示（拆片合并、fk 占比、监控超阈值等，不进率）
-# 对外仍输出 warnings 文本数组（老调用面兼容），另给 warnings_detail。
+# warnings are stored as dicts: {"piece": piece number or None, "where": row location or
+#   None, "code": category, "msg": human-readable text}
+#   * non-empty where = row-level warning (counts toward the warning-rate numerator;
+#     multiple warnings on the same row count as one row)
+#   * empty where = chunk-level hint (split merge, fk ratio, monitoring thresholds, etc.,
+#     not counted toward the rate)
+# The output still exposes warnings as a text array (legacy calling contract), plus
+# warnings_detail.
 
 def warn_row(warnings, where, code, msg, piece=None):
     warnings.append({"piece": piece, "where": where, "code": code, "msg": msg})
@@ -300,7 +373,7 @@ def warn_note(warnings, code, msg):
     return warnings[-1]
 
 
-# ---------------------------------------------------------------- 基础工具
+# ---------------------------------------------------------------- basic utilities
 
 def load_json(path, what):
     p = pathlib.Path(path)
@@ -313,12 +386,13 @@ def load_json(path, what):
 
 
 def event_hash(chunk_id, pos):
-    """schema v6 顶层 event_id_algorithm：sha256("chunk_id:偏移")[:16]。"""
+    """schema v6 top-level event_id_algorithm: sha256("chunk_id:offset")[:16]."""
     return hashlib.sha256(("%s:%d" % (chunk_id, pos)).encode("utf-8")).hexdigest()[:16]
 
 
 def norm_ws(s):
-    """quote 定位用：全半角归一 + 去所有空白（与 check_2 同口径）。"""
+    """Used for quote locating: full/half-width normalization + strip all whitespace
+    (same criterion as check_2)."""
     s = unicodedata.normalize("NFKC", str(s))
     for ch in WS_CHARS:
         s = s.replace(ch, "")
@@ -326,10 +400,12 @@ def norm_ws(s):
 
 
 def find_offset(text, needle, start=0, end=None):
-    """在原文 [start,end) 窗口内定位 quote，返回**对整份 chunk**的起始字符偏移；找不到返回 None。
+    """Locate a quote within the source [start,end) window, returning the starting
+    character offset **against the whole chunk**; returns None if not found.
 
-    拆片时每片只搜自己的窗口（片内偏移 + start = 全局偏移），保证 抽取位置 始终是
-    「未改动的原始 chunk」里的偏移（R9 定义），而不是片内偏移。
+    When split, each piece only searches its own window (piece-local offset + start =
+    global offset), ensuring the extraction position is always the offset in the
+    "unmodified original chunk" (per R9), not a piece-local offset.
     """
     if not needle:
         return None
@@ -341,7 +417,7 @@ def find_offset(text, needle, start=0, end=None):
     idx = window.find(needle)
     if idx >= 0:
         return start_ + idx
-    # 归一化后匹配，再按字符映射回原文偏移
+    # match after normalization, then map back to the original offset by character
     target = norm_ws(needle)
     if not target:
         return None
@@ -360,20 +436,22 @@ def find_offset(text, needle, start=0, end=None):
     return None
 
 
-# ---------------------------------------------------------------- task-102 三：时间基准（RELATIVE_BASE）
+# ---------------------------------------------------------------- time base (RELATIVE_BASE)
 #
-# 「相对谁」是相对时间的核心：昨天 / 3 天前 / last week 必须相对**数据自身的时间**绝对化，
-# 不许相对「跑的那一刻」（now()）。三级取最细：turn > session > chunk。
-#   * 每行落 base_source（用了哪个字段）+ base_granularity（turn/session/chunk）；
-#   * 三级都拿不到 => time_norm=null + time_uncertain=true，绝不 now()；
-#   * chunk 内时间跨度 > 24h 且含相对时间 => 报警「chunk 级基准不可信」（见 span_alarm_of）。
+# "Relative to what" is the core of relative time: yesterday / 3 days ago / last week
+# must be absolutized against **the data's own time**, never against "the moment of the
+# run" (now()). Three levels, finest first: turn > session > chunk.
+#   * each row records base_source (which field was used) + base_granularity (turn/session/chunk);
+#   * none of the three available => time_norm=null + time_uncertain=true, never now();
+#   * in-chunk time span > 24h and containing relative time => warn "chunk-level base
+#     unreliable" (see span_alarm_of).
 BASE_LEVELS = ("turn_time", "session_time")
 BASE_GRANULARITY = {"turn_time": "turn", "session_time": "session", "time_ref": "chunk"}
 BASE_FALLBACK_FIELD = "time_ref"
 
 
 def _base_value(chunk, key):
-    """取基准字段值；turn_time 也接受 chunk["turn"]={"time":...} 这种嵌套写法。"""
+    """Read the base field value; turn_time also accepts the nested chunk["turn"]={"time":...} form."""
     val = chunk.get(key)
     if isinstance(val, str) and val.strip():
         return val.strip()
@@ -387,9 +465,9 @@ def _base_value(chunk, key):
 
 
 def chunk_time_base(chunk):
-    """chunk -> (base_iso, base_source, base_granularity)；三级都拿不到 -> (None, None, None)。
+    """chunk -> (base_iso, base_source, base_granularity); none available -> (None, None, None).
 
-    取最细可用的：turn > session > chunk(time_ref)。不猜、不用 now()。
+    Take the finest available: turn > session > chunk(time_ref). No guessing, no now().
     """
     for key in BASE_LEVELS:
         val = _base_value(chunk, key)
@@ -401,15 +479,22 @@ def chunk_time_base(chunk):
     return None, None, None
 
 
-# task-102 二：dateparser 只做「翻译」（time_raw -> time_norm），不做「补充」。
-# 它默认会给任何说法造一个日期（去年 -> 今天减一年、上个月 -> 今天减一月），所以先用
-# 白名单压住「说得不确定」的写法：年/月级含糊说法一律 -> None（这就是 task-101 抓的静默造假）。
-# task-104 一（P342）：范式从「白名单穷举放行」换成「默认接受 + 危险模式黑名单 + 结果自检」。
-# 旧白名单只放行 3 个英文模板与几种中文写法，dateparser 明明能解的「19:41」「上周」被挡成 null——
-# 穷举式设计的通病：没列到的就丢，而「没列到」永远比「列到了」多。现在只挡两类：
-#   ① DP_DANGEROUS：解析器会「补」的含糊说法（去年 -> 今年减一年、上个月 -> 今天减一月）；
-#   ② DP_INFER：必须推算的说法（下周三、周末——依赖「一周从哪天起」，不同实现给不同答案）。
-# 其余一律交给 dateparser，解出来的结果再过 self_check_time_result（结果自检），对不上才 null。
+# dateparser only "translates" (time_raw -> time_norm), it never "fills in".
+# By default it will invent a date for any phrase (去年 -> today minus a year, 上个月 ->
+# today minus a month), so we first suppress the "vague" phrases with a blacklist: vague
+# year/month phrases all become None (that is the silent fabrication the verbatim check
+# catches).
+# Paradigm changed from "whitelist allow" to "accept by default + dangerous-pattern
+# blacklist + result self-check". The old whitelist only allowed 3 English templates and
+# a few Chinese forms, so phrases dateparser could actually parse ("19:41", "上周") were
+# blocked into null — the general flaw of exhaustive designs: anything unlisted is
+# dropped, and "unlisted" is always larger than "listed". Now only two kinds are blocked:
+#   ① DP_DANGEROUS: vague phrases the parser would "fill in" (去年 -> this year minus a
+#     year, 上个月 -> today minus a month);
+#   ② DP_INFER: phrases that require inference (下周三, 周末 — depend on "which day the
+#     week starts", different implementations give different answers).
+# Everything else goes to dateparser; the parsed result then passes
+# self_check_time_result (result self-check), and only a mismatch becomes null.
 DP_DANGEROUS = re.compile(
     r"(去年|前年|明年|今年|本年|上年|下年|上一年|下一年|上个?月|下个?月|本月|该月|"
     r"上个?季度|下个?季度|本季度|季度末|"
@@ -421,18 +506,19 @@ DP_INFER = re.compile(
     r"(上上?|下下?|本|这)?个?周末|"
     r"\b(next|last|this|coming)\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b|"
     r"\b(the\s+)?(weekend|weekday)\b)", re.I)
-DP_AMBIGUOUS = DP_DANGEROUS  # 旧名字保留（自测/外部脚本还引用）
+DP_AMBIGUOUS = DP_DANGEROUS  # old name kept (self-tests / external scripts still reference it)
 DP_MAX_LEN = 40
-DP_ACCEPT = None  # task-104 一：放行名单已废弃（保留符号防止老脚本 import 失败）
+DP_ACCEPT = None  # the allow-list is deprecated (symbol kept so old scripts don't break on import)
 DP_ABS_PATTERNS = (
     re.compile(r"^\d{4}[-/年]\d{1,2}[-/月]\d{1,2}日?(\s*\d{1,2}[:：]\d{2}([:：]\d{2})?)?$"),
-    # task-103 二：带时区偏移的绝对时间同样不是「相对时间」（跨度报警不该把它算进去）
+    # an absolute time with a timezone offset is also not "relative time" (the span alarm should not count it)
     re.compile(r"^\d{4}-\d{2}-\d{2}[T ]\d{1,2}:\d{2}(:\d{2})?(Z|[+-]\d{2}:?\d{2})$"),
 )
 
 
 def time_expr_rejected(raw):
-    """task-104 一：只有「已知会造假」或「必须推算」的写法才拒绝，其余默认接受。"""
+    """Only phrases "known to fabricate" or "requiring inference" are rejected; the rest
+    are accepted by default."""
     if not isinstance(raw, str) or not raw.strip():
         return True
     s = unicodedata.normalize("NFKC", raw).strip()
@@ -442,11 +528,12 @@ def time_expr_rejected(raw):
 
 
 def time_expr_accepted(raw):
-    """task-104 一：默认接受（白名单穷举已废弃）——不在危险黑名单里就交给 dateparser 解。"""
+    """Accept by default (the exhaustive whitelist is deprecated) — anything not on the
+    dangerous blacklist goes to dateparser."""
     return not time_expr_rejected(raw)
 
 
-# task-104 一：结果自检用的时长换算（「3 天前」必须真的等于 基准-3 天）
+# duration conversion used by the result self-check ("3 days ago" must really equal base - 3 days)
 _DURATION_TO_SECONDS = {
     "秒": 1, "second": 1, "seconds": 1,
     "分钟": 60, "分": 60, "minute": 60, "minutes": 60,
@@ -459,7 +546,7 @@ _CN_DIGITS = {"零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四":
 
 
 def cn_number(tok):
-    """「3」/「三」/「两」/「半」/「十二」/「二十」-> float；解不出 None（不猜）。"""
+    """「3」/「三」/「两」/「半」/「十二」/「二十」-> float; returns None if unparseable (no guessing)."""
     if not isinstance(tok, str) or not tok.strip():
         return None
     t = tok.strip()
@@ -482,7 +569,7 @@ def cn_number(tok):
 
 
 def _iso_to_dt(iso):
-    """ISO（+08:00 / Z）-> aware datetime；解不出 None。"""
+    """ISO (+08:00 / Z) -> aware datetime; returns None if unparseable."""
     from datetime import datetime
     if not isinstance(iso, str) or not iso.strip():
         return None
@@ -503,13 +590,16 @@ SELFCHECK_MAX_YEARS = 100
 
 
 def self_check_time_result(raw, dt, base_iso=None):
-    """task-104 一：**结果自检**——解析结果必须能由原文解释，解释不了就是解析器在「补」。
+    """**Result self-check** — the parsed result must be explainable from the source text;
+    if it cannot, the parser was "filling in".
 
-    三条（都对得上才认）：
-      ① 原文写了钟点（19:41）=> 结果的时分必须一模一样；
-      ② 「N 个时间单位前」=> 结果必须等于 基准 - N（差 > 90 秒 = 自检失败）；
-      ③ 绝对/其它 => 结果年份不得离基准超过 SELFCHECK_MAX_YEARS 年（防去年/上个月被补成年份）。
-    返回 (ok, reason)；base 缺失而写法是相对时间 => 不自检通过（宁可 null，不猜基准）。
+    Three checks (all must hold to accept):
+      ① source text has a clock time (19:41) => the result's hour:minute must match exactly;
+      ② "N time units ago" => the result must equal base - N (difference > 90s = fail);
+      ③ absolute/other => the result year must not differ from base by more than
+         SELFCHECK_MAX_YEARS years (guards against 去年/上个月 being turned into a year).
+    Returns (ok, reason); if base is missing and the phrase is relative => do not pass
+    self-check (prefer null over guessing a base).
     """
     from datetime import timedelta
     if dt is None:
@@ -518,8 +608,10 @@ def self_check_time_result(raw, dt, base_iso=None):
     m = DP_TIME_CLOCK.search(s)
     if m:
         hh, mm = int(m.group(1)), int(m.group(2))
-        # 原文自带偏移（…-05:00 / Z）时，钟点是**那个时区**的墙钟：先换回原文时区再比，
-        # 否则上海换算后的 08:41 会被判成「与 19:41 不符」（task-103 的时区用例就是这种）。
+        # When the source carries its own offset (…-05:00 / Z), the clock time is that
+        # timezone's wall clock: convert back to the source timezone before comparing,
+        # otherwise the Shanghai-converted 08:41 would be judged "not equal to 19:41"
+        # (the timezone fixture case is exactly this).
         view = dt
         off = re.search(r"([+-])(\d{2}):?(\d{2})$", s)
         if off or s.endswith("Z"):
@@ -555,7 +647,8 @@ def self_check_time_result(raw, dt, base_iso=None):
 
 
 def is_absolute_time_expr(raw):
-    """绝对日期写法（不是相对时间）：跨度报警只看「含相对时间」的 chunk。"""
+    """Absolute date phrasing (not relative time): the span alarm only looks at chunks
+    that contain relative time."""
     if not isinstance(raw, str):
         return False
     s = unicodedata.normalize("NFKC", raw).strip()
@@ -563,22 +656,24 @@ def is_absolute_time_expr(raw):
 
 
 def shanghai_tz():
-    """Asia/Shanghai 的 tzinfo（task-103 二：时区 aware，别再靠字符串拼 +08:00）。
+    """tzinfo for Asia/Shanghai (timezone-aware, no longer string-concatenating +08:00).
 
-    zoneinfo 优先（tzdata 在 vendor/）；拿不到退回固定 +08:00——宁可退化，不许丢时区。
+    Prefers zoneinfo (tzdata in vendor/); falls back to a fixed +08:00 if unavailable —
+    prefer degradation over losing the timezone.
     """
     try:
         from zoneinfo import ZoneInfo
         return ZoneInfo("Asia/Shanghai")
-    except Exception:  # noqa: BLE001  没有 tzdata 也不能让时区消失
+    except Exception:  # noqa: BLE001  missing tzdata must not drop the timezone
         from datetime import timedelta, timezone
         return timezone(timedelta(hours=8))
 
 
-# 原文里的「时:分[:秒]」记号（NFKC 后全角冒号也变半角，中英同款）
+# the "hour:minute[:second]" marker in source text (after NFKC full-width colons also become half-width)
 DP_TIME_CLOCK = re.compile(r"(\d{1,2})[:\uff1a](\d{2})(?:[:\uff1a](\d{2}))?")
-# task-103 一：时长式相对说法自带粒度——「3 分钟前」的精度是分钟，不是日（不然会把
-# 20:02 抹成「某天」，反而丢掉原文真有的信息）。单位映射见 DURATION_UNIT_PRECISION。
+# duration-style relative phrases carry their own precision — "3 分钟前" is minute-precise,
+# not day (otherwise 20:02 would be smeared into "some day", losing real source info).
+# Unit mapping in DURATION_UNIT_PRECISION.
 DP_DURATION = re.compile(
     r"(\d+|[一二三四五六七八九十两半]+)\s*(秒|分钟|分|小时|天|周|星期|second|minute|hour|day|week)s?"
     r"\s*(前|ago)", re.I)
@@ -587,14 +682,16 @@ DURATION_UNIT_PRECISION = {
     "分钟": "minute", "分": "minute", "小时": "minute", "minute": "minute", "hour": "minute",
     "天": "day", "周": "day", "星期": "day", "day": "day", "week": "day",
 }
-# task-107 五(b)：**我们自己的实现错**——旧口径只认「3 分钟前 / 3 minutes ago」，
-# 「A minute later / in two hours / 5 分钟后」这类**前瞻**写法一律落到 day，把分钟级的
-# 相对时间降级成「只有日期」（time_norm 里的时刻被抹掉）。这里把前向写法也认成时长，
-# 精度按单位给（分钟级就 minute），不再默认 day。
-# 只认「确定的数」（数字 / a / an / one..ten），「a few / 几分钟」这类模糊量词不算——
-# 那种该由「解不出 => unknown」的那条路处理，不许硬猜成 day。
-# 两条形状：「in two hours / 两小时后」（in 开头，后面不必再跟时间副词）与
-# 「A minute later / 5 分钟后」（数量 + 单位 + 时间副词）。
+# The old criterion only recognized "3 分钟前 / 3 minutes ago", so forward-looking
+# phrases like "A minute later / in two hours / 5 分钟后" all fell to day, downgrading
+# minute-level relative time to "date only" (the clock time in time_norm got erased).
+# Here forward phrases are also recognized as durations, precision follows the unit
+# (minute-level -> minute), no longer defaulting to day.
+# Only "definite numbers" are recognized (digit / a / an / one..ten); vague quantifiers
+# like "a few / 几分钟" do not count — those are handled by the "unparseable => unknown"
+# path, never forced into day.
+# Two shapes: "in two hours / 两小时后" (starts with in, no trailing time adverb needed)
+# and "A minute later / 5 分钟后" (number + unit + time adverb).
 DP_DURATION_FWD = re.compile(
     r"\bin\s+(\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten|一|二|两|三|四|五|六|七|八|九|十|几|半)\s*"
     r"(秒|分钟|分|小时|天|周|星期|second|minute|hour|day|week)s?\b"
@@ -605,13 +702,15 @@ DP_DURATION_FWD = re.compile(
 
 
 def time_precision_of(raw):
-    """task-103 一：**原文的**时间精度（day / minute / second），不是解析器补出来的精度。
+    """The **source text's** time precision (day / minute / second), not a precision the
+    parser invented.
 
-    * 有秒 -> second；只有「时:分」-> minute；
-    * 只有日期或相对日词（昨天 / last week / 2026-03-14）-> day；
-    * 没有 time_raw -> None（「不知道」不等于「只知道到日」）。
-    task-107 五(b)：时长式相对说法**前后向都认**（3 分钟前 / A minute later / in two hours），
-    精度跟随单位；旧实现只认「前 / ago」，把「A minute later」判成 day，时刻被整条抹掉。
+    * has seconds -> second; only "hour:minute" -> minute;
+    * only a date or relative day word (昨天 / last week / 2026-03-14) -> day;
+    * no time_raw -> None ("unknown" is not "only known to the day").
+    Duration-style relative phrases are recognized in both directions (3 分钟前 / A minute
+    later / in two hours), precision follows the unit; the old implementation only
+    recognized "前 / ago" and judged "A minute later" as day, erasing the clock time.
     """
     if not isinstance(raw, str) or not raw.strip():
         return None
@@ -625,19 +724,22 @@ def time_precision_of(raw):
         return DURATION_UNIT_PRECISION.get(unit, "day")
     m = DP_DURATION_FWD.search(s)
     if m:
-        # 两个分支的组号：in 分支单位在 group(2)，数量+副词分支单位在 group(4)
+        # two-branch group numbering: in-branch unit is group(2), number+adverb branch unit is group(4)
         unit = (m.group(2) or m.group(4) or "").lower()
         return DURATION_UNIT_PRECISION.get(unit, "day")
     return "day"
 
 
 def format_time_norm(dt, precision):
-    """datetime -> time_norm 字符串；day 精度**只写日期**（task-103 一）。
+    """datetime -> time_norm string; day precision writes **the date only**.
 
-    背景（审查端 P340）：「昨天」原文只有日精度，旧实现却存了 T10:00:00——那是 **BASE 的时刻**，
-    不是记录的时刻；用户问「昨天几点改的」就会拿到一个凭空来的答案。所以 day 精度只落日期，
-    让「几点」答不出来（该说「只知道是昨天」），minute/second 才落时刻。
-    minute 精度落 HH:MM:00（秒位是补齐，不是观测到的秒值，口径写在 schema 描述里）。
+    Background: "昨天" is day-precise in the source, but the old implementation stored
+    T10:00:00 — that is the **BASE's clock time**, not the record's time; asking "what
+    time yesterday was it changed" would then yield an invented answer. So day precision
+    records only the date, making "what time" unanswerable (the correct answer is "only
+    known to be yesterday"); minute/second precision records the clock time.
+    minute precision records HH:MM:00 (the seconds are padded, not an observed value; the
+    spec is in the schema description).
     """
     aware = dt if dt.tzinfo is not None else dt.replace(tzinfo=shanghai_tz())
     aware = aware.astimezone(shanghai_tz())
@@ -647,7 +749,8 @@ def format_time_norm(dt, precision):
 
 
 def _dp_parse(raw, base_iso):
-    """dateparser 解析（RELATIVE_BASE 显式传数据自身时间）；低置信/解析失败 -> None。"""
+    """dateparser parse (RELATIVE_BASE explicitly passes the data's own time); low
+    confidence / parse failure -> None."""
     if DATEPARSER is None:
         raise ExtractError(
             "dateparser 不可用（task-102 二）：请确认 工作区/vendor/ 下有 dateparser，"
@@ -659,7 +762,7 @@ def _dp_parse(raw, base_iso):
     if isinstance(base_iso, str) and ISO_PATTERN.match(base_iso):
         base = datetime.strptime(base_iso, "%Y-%m-%dT%H:%M:%S+08:00")
     if base is None and not is_absolute_time_expr(raw):
-        # 相对时间却没有基准 => 解不出。**绝不退回 dateparser 默认的 now()**
+        # relative time with no base => unparseable. **never fall back to dateparser's default now()**
         return None
     settings = {"TIMEZONE": "Asia/Shanghai", "TO_TIMEZONE": "Asia/Shanghai",
                 "RETURN_AS_TIMEZONE_AWARE": True}
@@ -668,16 +771,18 @@ def _dp_parse(raw, base_iso):
     try:
         dt = DATEPARSER.parse(unicodedata.normalize("NFKC", raw).strip(),
                               languages=["zh", "en"], settings=settings)
-    except Exception:  # noqa: BLE001  解析器内部异常一律当「解不出」，不猜
+    except Exception:  # noqa: BLE001  parser internal errors are treated as "unparseable", no guessing
         return None
     if dt is None:
         return None
-    # task-103 二：解析结果必须带时区（RETURN_AS_TIMEZONE_AWARE 已开）；裸时间按
-    # Asia/Shanghai 解释，再统一换算——time_norm 的时区不再是被丢掉的字符串后缀。
+    # The parsed result must carry a timezone (RETURN_AS_TIMEZONE_AWARE is on); a bare
+    # time is interpreted as Asia/Shanghai then converted uniformly — time_norm's timezone
+    # is no longer a dropped string suffix.
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=shanghai_tz())
     dt = dt.astimezone(shanghai_tz())
-    # task-104 一：结果自检——解析结果必须能由原文+基准解释，解释不了就 null（宁可没有，不猜）
+    # Result self-check — the parsed result must be explainable from source+base; if not,
+    # null (prefer nothing over guessing)
     ok, why = self_check_time_result(raw, dt, base_iso if isinstance(base_iso, str) else None)
     if not ok:
         return None
@@ -685,9 +790,10 @@ def _dp_parse(raw, base_iso):
 
 
 def rel_time(raw, ref_iso):
-    """相对时间以 ref_iso 为参照解成绝对时间（task-102：换 dateparser，删掉手写中文正则）。
+    """Resolve a relative time against ref_iso into an absolute time (dateparser replaces
+    the hand-written Chinese regex).
 
-    解不出/低置信返回 None（不猜）。
+    Unparseable / low confidence returns None (no guessing).
     """
     return _dp_parse(raw, ref_iso)
 
@@ -698,11 +804,13 @@ def datetime_from(fmt, raw):
 
 
 def normalize_time(raw, ref_iso=None, base_iso=None):
-    """time_raw -> ISO8601 定长（YYYY-MM-DDTHH:MM:SS+08:00）；**推不出就 None，绝不猜**。
+    """time_raw -> fixed-length ISO8601 (YYYY-MM-DDTHH:MM:SS+08:00); **None if underivable,
+    never guess**.
 
-    task-101：本函数是 time_norm 的唯一来源（模型自报值一律丢弃）。
-    task-102：换 dateparser（只翻译、不补充）；相对时间的基准是**数据自身时间**
-    （base_iso，三级取最细 turn>session>chunk），不是 now()；基准拿不到 + 是相对说法 => None。
+    This function is the sole source of time_norm (any model-reported value is discarded).
+    dateparser (translates only, never fills in); the relative-time base is the **data's
+    own time** (base_iso, finest of turn>session>chunk), not now(); no base available and
+    the phrase is relative => None.
     """
     if not isinstance(raw, str) or not raw.strip():
         return None
@@ -711,7 +819,7 @@ def normalize_time(raw, ref_iso=None, base_iso=None):
     if ISO_PATTERN.match(raw):
         return raw
     if DAY_PATTERN.match(raw):
-        # 已经是「只有日期」的写法：原样即 day 精度的合法 time_norm
+        # already a "date only" form: verbatim is a legal day-precision time_norm
         return raw
     base = base_iso if isinstance(base_iso, str) and base_iso.strip() else ref_iso
     dt = _dp_parse(raw, base)
@@ -720,16 +828,22 @@ def normalize_time(raw, ref_iso=None, base_iso=None):
     return format_time_norm(dt, precision)
 
 
-# ---------------------------------------------------------------- task-101 三：op_type 英文别名
+# ---------------------------------------------------------------- op_type English aliases
 #
-# 背景（审查端 P331）：英文剧情动作（went to / painted / signed / scored）41/41 全判 other——
-# prompt 里只写了中文判据，英文动作词没进别名表。修法不是让模型更聪明，而是把「动作词 ->
-# 枚举」写成程序可复算的别名表（中英都要）：模型判 other 但动作词在表里能归到具体枚举时，
-# 程序改判并留 warning（op_type_alias）。表里没有的词才允许留在 other。
-# 顺序：backup/restart/read 先于 write（「备份/重启/核对」都含有「做」的意味，先拿具体的）。
+# Background: English narrative actions (went to / painted / signed / scored) were all
+# judged "other" — the prompt only stated Chinese criteria, and English action words were
+# not in the alias table. The fix is not "make the model smarter" but to write the
+# "action word -> enum" mapping as a program-recomputable alias table (both Chinese and
+# English): when the model says other but the action word maps to a concrete enum in the
+# table, the program re-judges and records a warning (op_type_alias). Only words absent
+# from the table may stay "other".
+# Order: backup/restart/read come before write (backup/restart/verify all carry a "doing"
+# sense; take the specific one first).
 #
-# task-107 四：上面这些是词表，**判定算法**另外两条（见 alias_op_type）——主句限定 + 最长匹配。
-# 「检查」抢「改写」这种误判不是词表少了一条，是拿整句做子串匹配、命中最先到就返回。
+# The above is the word table; the **judgment algorithm** is two further rules (see
+# alias_op_type) — main-clause restriction + longest match. A misjudgment like 检查
+# stealing 改写 is not a missing table entry but a whole-sentence substring match that
+# returns on the first hit.
 
 MAIN_CLAUSE_SPLIT = re.compile(r"[,，;；。]|\.(?:\s|$)|\band\b|\bthen\b|\bafter that\b", re.I)
 
@@ -747,7 +861,7 @@ OP_TYPE_ALIAS = (    ("backup", (
         r"\breview(ed|s|ing)?\b", r"\bexamin(e|ed|es|ing)\b", r"\bverif(y|ied|ies|ying)\b",
         r"\blook(ed|s|ing)?\s+(at|into|over)\b", r"\bopen(ed|s|ing)?\b",
         r"\bscan(ned|s|ning)?\b", r"\blist(ed|s|ing)?\b",
-        # task-107 四：短语级别名（比单词长，最长匹配下自动压过 check/read 这类泛词）
+        # phrase-level aliases (longer than words; longest-match automatically beats generic words like check/read)
         r"\bwent\s+through\b", r"\bwent\s+over\b", r"\bgo(es|ing)?\s+through\b",
         r"\bread\s+through\b", r"\bcompared?\b", r"\bcompar(e|ed|es|ing)\s+with\b",
         r"\bsigned\s+off\b", r"\bcross-?check(ed|s|ing)?\b", r"\bwent\s+back\s+over\b",
@@ -765,8 +879,8 @@ OP_TYPE_ALIAS = (    ("backup", (
         r"\binstall(ed|s|ing)?\b", r"\bpaint(ed|s|ing)?\b", r"\bdr(ew|awn|aw|aws|awing)\b",
         r"\bsign(ed|s|ing)?\b", r"\bwrit(e|ten)\b", r"\bappend(ed|s|ing)?\b",
         r"\bwrote\s+up\b", r"\bwrote\s+down\b", r"\bfilled\s+in\b",
-        # task-107 四：去掉单字别名（「写」「读」「画」在中文里几乎处处命中，是误判源）；
-        # 保留的都是一眼能定动作的双字及以上写法。
+        # single-character aliases removed (写/读/画 hit almost everywhere in Chinese and are
+        # misjudgment sources); kept entries are two-plus-character forms that clearly name an action.
         "写入", "改写", "编写", "修复", "修改", "保存", "新建", "创建", "删除", "重命名",
         "安装", "生成", "签名", "签署", "追加", "补了", "填了",
     )),
@@ -783,11 +897,13 @@ OP_ALIAS_DEFAULT = "other"
 
 
 def leading_clause(text):
-    """只取主句（第一个逗号/分号/句号/and/then 之前）：主句动词才是这个事件的动作。
+    """Take only the main clause (before the first comma/semicolon/period/and/then): the
+    main-clause verb is the action of this event.
 
-    task-107 四：旧实现拿**整句**做子串匹配，于是「把 red-sample 断言拆成每个检查独立断言」里的
-    「检查」抢在「改写」前面（表序 read 先于 write），把 write 判成 read——这是**表的错**，
-    不是模型的错。主句 + 最长匹配两条一起改。
+    The old implementation substring-matched the **whole sentence**, so the 检查 in
+    "把 red-sample 断言拆成每个检查独立断言" stole the match from 改写 (table order read
+    before write), judging write as read — that is a **table flaw**, not a model flaw.
+    Main-clause + longest-match fix both together.
     """
     if not isinstance(text, str):
         return ""
@@ -796,14 +912,18 @@ def leading_clause(text):
 
 
 def alias_op_type(text, quote=None):
-    """动作文本 -> op_type 枚举（中英别名；归不了返回 other，不猜）。
+    """Action text -> op_type enum (Chinese and English aliases; falls back to other, no
+    guessing).
 
-    task-107 四（谁错定论之后修表）：
-      * **主句优先**：只在主句里找动作词；主句没结论才看整句；
-      * **最长匹配优先**：短语（went through / signed off on / wrote up / compared）压过单词，
-        单词之间比长度，长度相同再按「词表顺序（具体优先）」；
-      * **去掉单字中文别名**（写/读/画）：单字在中文里几乎处处命中，是误判源；
-      * quote（原文）与 action 同时给时：原文是英文剪贴，优先用原文。
+      * **main clause first**: only search for the action word in the main clause; look at
+        the whole sentence only if the main clause gives no result;
+      * **longest match first**: phrases (went through / signed off on / wrote up /
+        compared) beat single words; words compare by length, ties fall back to "table
+        order (specific first)";
+      * **single-character Chinese aliases removed** (写/读/画): single characters hit
+        almost everywhere in Chinese and are misjudgment sources;
+      * when both quote (source) and action are given: the source is an English verbatim,
+        prefer the source.
     """
     for src in (text, quote):
         if not isinstance(src, str) or not src.strip():
@@ -816,9 +936,10 @@ def alias_op_type(text, quote=None):
 
 
 def _alias_longest(text):
-    """在 text 里找「最长命中的别名」；同长按位置（靠前=主动词）、再按词表顺序。"""
+    """Find the "longest matching alias" in text; ties by position (earlier = main verb),
+    then by table order."""
     low = text.lower()
-    best = None      # (长度, -位置, -表序, op)
+    best = None      # (length, -position, -table order, op)
     for order, (op, cues) in enumerate(OP_TYPE_ALIAS):
         for cue in cues:
             if cue.startswith("\\b"):
@@ -841,9 +962,11 @@ ALIASERS = {"op_type": alias_op_type}
 
 
 def time_raw_verbatim(raw, text):
-    """task-101 二：time_raw 是纯剪贴——必须能在 chunk 原文里原样找到（空白归一后也算）。
+    """time_raw is pure verbatim — it must appear as-is in the chunk source (whitespace
+    normalization also counts).
 
-    找不到 = 模型把原文改写了（yesterday -> 昨天、相对时间 -> 绝对时间），违约；返回 False。
+    Not found = the model rewrote the source (yesterday -> 昨天, relative -> absolute), a
+    contract violation; returns False.
     """
     if not isinstance(raw, str) or not raw.strip():
         return True
@@ -852,7 +975,7 @@ def time_raw_verbatim(raw, text):
     return raw.strip() in text or norm_ws(raw) in norm_ws(text)
 
 
-# ---------------------------------------------------------------- 拆片（task-63 ③）
+# ---------------------------------------------------------------- chunk splitting
 
 def max_chunk_chars():
     raw = os.environ.get("DEEPSEEK_MAX_CHUNK_CHARS")
@@ -867,9 +990,10 @@ def max_chunk_chars():
 
 
 def split_chunk(text, limit=None):
-    """把 chunk 原文按行边界切成 ≤limit 的片，返回 [(start, end), ...]（对原 chunk 的全局偏移）。
+    """Split chunk source into pieces ≤limit along line boundaries, returning
+    [(start, end), ...] (global offsets into the original chunk).
 
-    单行本身超长时硬切（切点落在这行中间），不丢字符。
+    A single overlong line is hard-cut (the cut lands mid-line), no characters dropped.
     """
     limit = int(limit or max_chunk_chars())
     text = str(text)
@@ -882,21 +1006,23 @@ def split_chunk(text, limit=None):
         if end < len(text):
             cut = text.rfind("\n", start + 1, end)
             if cut > start:
-                end = cut + 1  # 保留换行在片尾，下一片从下一行开头起
+                end = cut + 1  # keep the newline at the piece tail; next piece starts at the next line
         spans.append((start, end))
         start = end
     return spans
 
 
-# task-75（P225）：拆片依据（build_log.split_on）——「按什么切的」必须能查，
-# 只看 pieces 数字看不出「参数变了」还是「模型变了」（prompt sha 变化要可解释）。
-SPLIT_ON_NONE = "none"                 # 没拆（整份一次调用）
-SPLIT_ON_LINE = "line_boundary"        # 全部切点落在换行处
-SPLIT_ON_HARD = "line_boundary+hard_cut"  # 有单行超长、被硬切（切点在这行中间）
+# Split basis (build_log.split_on) — "how it was cut" must be inspectable; the pieces
+# number alone cannot tell "parameter changed" from "model changed" (prompt sha changes
+# must be explainable).
+SPLIT_ON_NONE = "none"                 # not split (one call for the whole chunk)
+SPLIT_ON_LINE = "line_boundary"        # every cut point lands on a newline
+SPLIT_ON_HARD = "line_boundary+hard_cut"  # some single line overlong, hard-cut (cut mid-line)
 
 
 def split_on_of(text, spans):
-    """task-75：这批片是按行边界切的，还是有单行超长被硬切——落到 build_log.split_on。"""
+    """Whether these pieces were cut on line boundaries, or some single line was hard-cut —
+    recorded into build_log.split_on."""
     if len(spans) <= 1:
         return SPLIT_ON_NONE
     hard = any(str(text)[end - 1:end] != "\n" for _, end in spans[:-1])
@@ -967,9 +1093,10 @@ CHUNK>>>
 """
 
 
-# task-73 ③：prompt 自检——文本里不许出现「删行指令」。
-# 字段可选 ≠ 行可选：这轮反复栽的就是这条（event_id 可选被读成「整行可省」，
-# quote 给不出被读成「这行别要」）。命中即硬报错，不让带病的 prompt 发出去。
+# prompt self-check — the text must not contain any "delete-row instruction".
+# Optional field != optional row: this is the recurring failure (optional event_id read
+# as "the whole row may be omitted", missing quote read as "drop this row"). A hit is a
+# hard error, so a defective prompt is never sent.
 PROMPT_DELETE_ROW_PATTERNS = (
     "不要单独成行", "别单独成行", "不要成行", "别成行",
     "不要写这一行", "别写这一行", "不要这一行", "别要这一行",
@@ -978,9 +1105,10 @@ PROMPT_DELETE_ROW_PATTERNS = (
 
 
 def check_prompt_no_delete_rows(prompt):
-    """task-73 ③：prompt 文本里出现删行指令 -> 硬报错（ExtractError，不发请求）。
+    """A delete-row instruction in the prompt -> hard error (ExtractError, no request sent).
 
-    返回 {"ok": True, "patterns": [...]}，green 用例用它证明「自检真的在跑」。
+    Returns {"ok": True, "patterns": [...]}, which green cases use to prove the self-check
+    is actually running.
     """
     text = prompt or ""
     hits = [p for p in PROMPT_DELETE_ROW_PATTERNS if p in text]
@@ -992,7 +1120,8 @@ def check_prompt_no_delete_rows(prompt):
 
 
 def render_fields_block(rules):
-    """prompt 的「字段」段由 schema + rules 生成：加字段只改 schema/rules，代码不用动。"""
+    """The prompt's "fields" section is generated from schema + rules: adding a field only
+    changes schema/rules, no code change needed."""
     lines = []
     for fk in rules.order:
         required, optional, auto, nullable = [], [], [], []
@@ -1011,9 +1140,9 @@ def render_fields_block(rules):
             elif spec["on_missing"] == "warn":
                 optional.append(label)
             elif spec["on_missing"] == "null":
-                # task-101 二（P331）：「缺省」≠「垃圾」——没有就写 null，不是必填、也不是不许写
-                # task-107 一：null 的含义按字段走（canonical_id 是「查不到」，不是「原文没有」），
-                # 所以允许 spec.null_note 覆盖这句通用解释。
+                # "default" != "garbage" — absent means write null, neither required nor forbidden
+                # null's meaning is per-field (canonical_id is "not found", not "absent from
+                # source"), so spec.null_note may override this generic explanation.
                 nullable.append("%s（%s）" % (name, spec["null_note"])
                                 if spec.get("null_note") else label)
             else:
@@ -1036,10 +1165,13 @@ def render_fields_block(rules):
 
 
 def render_temp_fields_block(rules):
-    """task-69 ②：三表用「所属事件序号」引用事件——序号由程序按 抽取位置 排序编号，LLM 不写序号。
+    """The three tables reference an event via 所属事件序号 — the program numbers them by
+    extraction position, the LLM does not write the number.
 
-    字段名/表全部由 rules 驱动（_temp_fields 的 role），代码不写死任何字段名字面量；
-    正例/反例是 P215 ② 的硬要求（反例贴真数 1816 = 真调用里模型填的值自己的偏移）。
+    Field/table names are all driven by rules (the _temp_fields role); the code hard-codes
+    no field-name literal. The positive/negative examples are a hard requirement (the
+    negative example uses the real number 1816 = the value's own offset the model actually
+    filled in a real call).
     """
     lines = []
     for fk in rules.order:
@@ -1077,12 +1209,12 @@ def build_prompt(chunk, part=None, rules=None, schema=None):
                                     text=chunk["text"], part_note=part_note,
                                     fields_block=render_fields_block(rules),
                                     temp_fields_block=render_temp_fields_block(rules))
-    # task-73 ③：发出去之前先自检「没有删行指令」（fail fast，不带病跑模型）
+    # self-check "no delete-row instruction" before sending (fail fast, don't run the model on a defective prompt)
     check_prompt_no_delete_rows(prompt)
     return prompt
 
 
-# ---------------------------------------------------------------- 模型输出解析
+# ---------------------------------------------------------------- model output parsing
 
 def strip_fences(text):
     t = (text or "").strip()
@@ -1096,7 +1228,7 @@ def parse_entities_text(text):
     raw = strip_fences(text)
     try:
         doc = json.loads(raw)
-    except Exception:  # noqa: BLE001 允许前后有闲话时抓第一个 {...}
+    except Exception:  # noqa: BLE001  grab the first {...} when there is chatter around it
         start, end = raw.find("{"), raw.rfind("}")
         if start < 0 or end <= start:
             raise ExtractError("模型输出不是 JSON：%r" % raw[:200])
@@ -1115,7 +1247,8 @@ def schema_props(ent):
 
 
 def keep_known_fields(row, props, warnings, where, piece=None):
-    """R6：暗字段不许过。这里就地丢弃并记 warning（check_0 仍会对最终数据做硬校验）。"""
+    """R6: hidden fields must not pass. Discarded in place with a warning (check_0 still
+    hard-validates the final data)."""
     unknown = [k for k in row if k not in props]
     for k in unknown:
         row.pop(k, None)
@@ -1128,13 +1261,15 @@ def scope_of(chunk):
     return chunk.get("_scope") or (0, len(chunk["text"]))
 
 
-# ---------------------------------------------------------------- 方案 C：外键归属
+# ---------------------------------------------------------------- foreign-key attribution
 
 def card_spans(cards, text_len, pos_field, qkey=None, qtkey=None):
-    """每张卡片的事件区间 [start, end]（end 优先取 quote.原文 长度，缺 quote 就取下一卡起点）。
+    """Each card's event interval [start, end] (end prefers the quote.原文 length; without
+    a quote it takes the next card's start).
 
-    字段名由 schema + rules 传入（卡片一样不写死字段名）。
-    task-67 ③：区间带上卡片引文头（用于 fk 明细里「挂到哪张卡」）。
+    Field names come from schema + rules (cards likewise hard-code no field name).
+    The interval carries the card's quote head (used in fk detail for "which card it
+    attached to").
     """
     ordered = sorted(cards, key=lambda r: r[pos_field])
     spans = []
@@ -1153,21 +1288,25 @@ def card_spans(cards, text_len, pos_field, qkey=None, qtkey=None):
 
 
 def _quote_head(text, limit=24):
-    """引文头（截断到 limit 字符，超长加省略号）：给人定位是哪张卡，不存整段。"""
+    """Quote head (truncated to limit chars, ellipsis when overlong): for locating which
+    card, not storing the whole span."""
     if not text:
         return None
     s = str(text)
     return s if len(s) <= limit else s[:limit] + "…"
 
 
-# task-67 ③：nearest 占比报警线（>10% 认为卡片粒度太粗；报警时把 nearest 行明细一并列出）
+# nearest-ratio alarm line (>10% means card granularity is too coarse; the nearest-row
+# detail is listed alongside the alarm)
 FK_NEAREST_RATIO_MAX = 0.1
 
 
 def _as_event_seq(value):
-    """task-69 ①：把模型给的「事件序号」规整成 int；给不出/形态非法返回 None。
+    """Normalize the model's "event sequence" to an int; returns None if absent or
+    ill-formed.
 
-    「给错」和「没给」必须分得开：这里只负责形态，越界/指向不存在的序号由 FkResolver 判。
+    "Wrong" and "missing" must stay distinguishable: this only handles the shape;
+    out-of-range / pointing at a nonexistent sequence is judged by FkResolver.
     """
     if value is None or isinstance(value, bool):
         return None
@@ -1183,34 +1322,45 @@ def _as_event_seq(value):
 
 
 class FkResolver:
-    """task-63 ②：三表行的 event_id 由程序按偏移归属，LLM 不填。
+    """The three tables' event_id is assigned by the program by offset; the LLM does not
+    fill it.
 
-    task-69 ②：归属顺序 explicit -> contain -> nearest，explicit 靠「所属事件序号」：
-    ⓪ 模型给的「所属事件序号」= N，在 1..n 内且指向本片某张卡 -> explicit；
-       序号越界（不在 1..n）/ 形态不是整数 -> 报红 hint_invalid（计数 + warning，不是静默回落），
-       仍回落 contain/nearest 但不能当「没给」算（给错 ≠ 没给，鲸鲸 P213②）；
-    ① 本行偏移落在某张卡片的事件区间内 -> 归它（contain）；
-    ② 不落在任何区间 -> 取「偏移 ≤ 本行的最近一张卡片」（nearest，低置信）；
-    ③ 该 chunk 一张卡片都没有 -> 报错（三表行必须挂在某个事件下）。
+    Attribution order explicit -> contain -> nearest, explicit via 所属事件序号:
+    ⓪ the model's 所属事件序号 = N, within 1..n and pointing at some card of this piece
+        -> explicit;
+        out-of-range (not in 1..n) / not an integer -> red hint_invalid (count + warning,
+        not a silent fallback), still falls back to contain/nearest but must not count as
+        "missing" (wrong != missing);
+    ① this row's offset falls inside some card's event interval -> that card (contain);
+    ② inside no interval -> the "nearest card with offset ≤ this row" (nearest, low
+        confidence);
+    ③ this chunk has no card at all -> error (the three-table rows must attach to some
+        event).
 
-    task-67 ③：每行日志补「挂到哪张卡 + 差多少」（card_pos / card_quote / delta），
-    落 build_log 的 fk_method.detail，aggregate / mention 行能逐行定位。
-    task-68 ③：不进答案的行 confidence=low。
-    task-69 ②：序号按片解析（片号 -> {事件序号: event_id}），跨片同号不串。
-    task-70 ①：回落不再统一叫 nearest——按「表」分工（表驱动：event_id 可选的那张表 = mention）：
-      * mention   （identities）：锚点 = source_chunk_id + 抽取位置 + quote，event_id 不写（R12）；
-      * aggregate （metrics/facts）：派生汇总量，无单一源事件，锚点 = 该 chunk 的汇总段
-        （anchor=chunk_summary，外键取汇总段最近的卡片，保证 metrics/facts 外键仍非空）。
-      两张表都仍能先命中 contain（行偏移落在某张卡的事件区间内 = 这一天确实发生了这个值）。
+    Per-row log adds "which card + how far" (card_pos / card_quote / delta), recorded in
+    build_log's fk_method.detail; aggregate / mention rows are per-row locatable.
+    Rows that do not answer get confidence=low.
+    Sequences are resolved per piece (piece no. -> {event sequence: event_id}); equal
+    numbers across pieces do not collide.
+    The fallback is no longer uniformly "nearest" — it is split by table (table-driven:
+    the table whose event_id is optional = mention):
+      * mention   (identities): anchor = source_chunk_id + extraction position + quote,
+        event_id not written (R12);
+      * aggregate (metrics/facts): derived total, no single source event, anchor = this
+        chunk's summary segment (anchor=chunk_summary, foreign key takes the nearest card
+        of the summary segment, keeping metrics/facts' foreign key non-null).
+      Both tables can still first hit contain (the row offset falls inside some card's
+      interval = this value really happened that day).
     """
 
     def __init__(self, spans, text_len, pos_field, seq_maps=None, reorder=False,
                  tables=None, mention_tables=None):
-        # task-70 ①：三表顺序（分表统计要能列出 0 行的表）+ 哪些表的 event_id 是可选（= mention 表）
+        # table order (per-table stats must be able to list 0-row tables) + which tables have
+        # optional event_id (= mention tables)
         self.tables = list(tables or [])
         self.mention_tables = set(mention_tables or ())
-        # R14 facts 独立化：无卡片时，mention 表（facts/identities）仍可落盘（event_id=null）；
-        # 只有非 mention 表（metrics）需要卡片才能 aggregate。
+        # R14 facts independence: with no cards, mention tables (facts/identities) can still
+        # be written (event_id=null); only non-mention tables (metrics) need a card to aggregate.
         if not spans:
             non_mention = [t for t in self.tables if t not in self.mention_tables]
             if non_mention:
@@ -1221,19 +1371,21 @@ class FkResolver:
         self.pos_field = pos_field
         self.log = []
         self._span_of = {sp[2]: sp for sp in spans}
-        # task-69 ②：片号 -> {事件序号: event_id}（序号是片内编号，跨片会重号，不能全局一张表）
+        # piece no. -> {event sequence: event_id} (sequences are piece-local; they repeat
+        # across pieces, so one global table would collide)
         self.seq_maps = seq_maps or {}
-        self.reorder = bool(reorder)   # task-69 ③：LLM 输出顺序不是升序、程序重排过
-        self.hint_ok = 0            # 给了序号且命中卡片
-        self.hint_invalid = 0       # 给了序号但非法（越界 / 指向不存在的序号）
-        self.hint_missing = 0       # 没给序号
-        self.hint_invalid_rows = []  # 报警明细（where / piece / hint）
+        self.reorder = bool(reorder)   # LLM output order was not ascending, the program re-sorted
+        self.hint_ok = 0            # gave a sequence and hit a card
+        self.hint_invalid = 0       # gave a sequence but illegal (out of range / points at nothing)
+        self.hint_missing = 0       # gave no sequence
+        self.hint_invalid_rows = []  # alarm detail (where / piece / hint)
 
     def _is_mention_table(self, table):
         return table in self.mention_tables
 
     def _summary_anchor(self, probe):
-        """task-70 ①：aggregate 行的锚点 = 该 chunk 的汇总段（取偏移 ≤ 本行的最后一张卡）。"""
+        """An aggregate row's anchor = this chunk's summary segment (the last card with
+        offset ≤ this row)."""
         behind = [sp for sp in self.spans if sp[0] <= probe]
         if behind:
             return max(behind, key=lambda sp: sp[0])
@@ -1269,7 +1421,8 @@ class FkResolver:
         anchor = "event"
         if eid is None:
             if self._is_mention_table(table):
-                # R12：名称提及没有「唯一源事件」——不硬造外键，锚点交给 chunk+偏移+quote
+                # R12: a name mention has no "single source event" — do not fabricate a key;
+                # the anchor is chunk+offset+quote
                 method = FK_METHOD_MENTION
                 anchor = "chunk_quote"
                 eid = None
@@ -1279,10 +1432,10 @@ class FkResolver:
                 span = self._summary_anchor(probe)
                 eid = span[2]
         if eid is None:
-            row.pop("event_id", None)      # mention：event_id 可选，缺省不写（不是空串/占位）
+            row.pop("event_id", None)      # mention: event_id optional, absent means not written (not empty/placeholder)
         else:
             row["event_id"] = eid
-        row["__fk_method"] = method      # task-68 ③：临时标记（算完 answer 统一剥掉）
+        row["__fk_method"] = method      # temporary marker (stripped uniformly after answer is computed)
         if span is None:
             span = self._span_of.get(eid) or (None, None, eid, None)
         quote = row.get("quote")
@@ -1291,7 +1444,7 @@ class FkResolver:
                          "confidence": "high" if method in ANSWER_METHODS else "low",
                          "answerable": method in ANSWER_METHODS,
                          "has_quote": isinstance(quote, dict) and _nonempty(quote.get("原文")),
-                         # task-72 ③：成对覆盖要按「数据行」讲题，逐行带上 quote 原文
+                         # pairwise coverage reasons per "data row", carrying the quote source per row
                          "quote": (quote.get("原文") if isinstance(quote, dict) else None),
                          "hint": hint, "hint_seq": seq, "hint_status": hint_status,
                          "card_pos": span[0], "card_quote": span[3],
@@ -1309,15 +1462,19 @@ class FkResolver:
         return [dict(r) for r in self.log if r["method"] == FK_METHOD_MENTION]
 
     def _table_stats(self, table):
-        """task-70 ③：覆盖率分表算，不合并。
+        """Coverage is computed per table, never merged.
 
-        metrics / facts：explicit / (rows − aggregate_rows)——aggregate 行本来就没有可归属的事件，
-        不能算进分母，否则「派生的汇总值」会把覆盖率按比例拉低成没意义的数。
-        identities：只看 mention 覆盖率（有 quote 且能定位就算），**不进 explicit 的分母**。
+        metrics / facts: explicit / (rows − aggregate_rows) — aggregate rows have no
+        attributable event and must not enter the denominator, otherwise "derived totals"
+        would proportionally drag coverage into a meaningless number.
+        identities: only the mention coverage matters (has a quote and is locatable),
+        and does **not** enter the explicit denominator.
 
-        task-71 ①：分母为 0（全是 aggregate、或空表）时比值写 **null**（N/A），不写 1.0。
-        写 1.0 在报告口径上就是「满分」——一张全是汇总值的 chunk 会显示「explicit 100%」，
-        实际一个值都没挂事件。空分母的表记 vacuous=true，不进总体达标分母（见 summary()）。
+        An empty denominator (all aggregate, or an empty table) writes the ratio as
+        **null** (N/A), never 1.0. Writing 1.0 is "full marks" in report terms — a chunk
+        that is all summary values would show "explicit 100%" while no value actually
+        attached to an event. Empty-denominator tables are marked vacuous=true and do not
+        enter the overall passing denominator (see summary()).
         """
         rows = [r for r in self.log if r.get("table") == table]
         n = len(rows)
@@ -1332,7 +1489,7 @@ class FkResolver:
                     "mention": counts.get(FK_METHOD_MENTION, 0),
                     "aggregate": 0,
                     "locatable": locatable,
-                    # 空表也不报 100%：没有可比的行，比值就是 null
+                    # an empty table also does not report 100%: no comparable rows, ratio is null
                     "mention_coverage": round(locatable / n, 4) if n else None,
                     "vacuous": n == 0,
                     "in_explicit_denominator": False,
@@ -1356,70 +1513,74 @@ class FkResolver:
         nearest = count.get("nearest", 0)
         rows = len(self.log)
         per_table = {t: self._table_stats(t) for t in self.tables}
-        # task-71 ①：空分母表单列计数；「达标」只看有分母的表（scored_tables），
-        # 空分母表既不算满分、也不算不达标——它们压根不参与比例口径。
+        # empty-denominator tables are counted separately; "passing" only looks at tables
+        # with a denominator (scored_tables); empty-denominator tables count neither as
+        # full marks nor as failing — they simply do not participate in ratio terms.
         vacuous_tables = [t for t, s in per_table.items() if s.get("vacuous")]
         scored_tables = [t for t, s in per_table.items()
                          if not s.get("vacuous") and s.get("denominator")]
         return {"rows": rows, "explicit": explicit, "contain": contain,
                 "aggregate": aggregate, "mention": mention, "nearest": nearest,
-                # task-70 ③：判据按表算（per_table / coverage），不再报「合并」的 explicit 比例
+                # the criterion is per-table (per_table / coverage); no more "merged" explicit ratio
                 "per_table": per_table,
                 "coverage": per_table,
-                # task-71 ①：空分母（比值 null）的表清单 + 进达标统计的表清单
+                # empty-denominator (null ratio) table list + the tables that enter the passing stats
                 "vacuous_tables": vacuous_tables,
                 "vacuous_table_count": len(vacuous_tables),
                 "scored_tables": scored_tables,
                 "no_offset": sum(1 for r in self.log if r["pos"] is None),
                 "low_confidence": sum(1 for r in self.log if r.get("confidence") == "low"),
-                # task-69 ②③：给对 / 给错 / 没给 三格分开数（给错不许混进「没给」）
+                # correct / wrong / missing counted in three separate buckets (wrong must not blend into "missing")
                 "hint_given": self.hint_ok + self.hint_invalid,
                 "hint_ok": self.hint_ok,
                 "hint_invalid": self.hint_invalid,
                 "hint_missing": self.hint_missing,
                 "hint_invalid_ratio": round(self.hint_invalid / (rows or 1), 4),
                 "hint_invalid_rows": list(self.hint_invalid_rows),
-                "reorder": self.reorder,   # task-69 ③：卡片重排过 = LLM 顺序不可信
+                "reorder": self.reorder,   # cards were re-sorted = the LLM order is not trusted
                 "detail": list(self.log),
-                "aggregate_rows": self.aggregate_rows(),   # task-70 ①：逐行可定位
+                "aggregate_rows": self.aggregate_rows(),   # per-row locatable
                 "mention_rows": self.mention_rows(),
                 "nearest_rows": self.nearest_rows()}
 
 
-# ---------------------------------------------------------------- task-65 表驱动（P207）
+# ---------------------------------------------------------------- table-driven tiers
 #
-# A/B/C 三档不再写在代码里：extract_rules.json 给每个 schema 属性两个属性，
-#   on_missing=reject -> B 档：缺了硬拒该片并重试该片；
-#   on_missing=warn   -> C 档：缺了 strip + warning 容忍（不影响判分）;
-#   on_missing=fill   -> A 档：程序按 derive 指定的算法补（静默）。
-# 代码只遍历 schema.entities[*].properties 取属性，不列字段名。
-# 一致性 check（P208）：reject ⇒ required；warn ⇒ 非 required；fill ⇒ 都行。
+# A/B/C tiers are no longer written in code: extract_rules.json gives each schema
+# attribute two properties:
+#   on_missing=reject -> tier B: missing => hard-reject that piece and retry it;
+#   on_missing=warn   -> tier C: missing => strip + tolerate with warning (no score impact);
+#   on_missing=fill   -> tier A: the program fills it by the algorithm named in derive (silent).
+# Code only iterates schema.entities[*].properties for attributes, never listing field names.
+# Consistency check: reject ⇒ required; warn ⇒ non-required; fill ⇒ either.
 
 class Rules:
-    """extract_rules.json × schema 的已校验视图（表.字段 -> 属性）。"""
+    """The validated view of extract_rules.json × schema (table.field -> attribute)."""
 
     def __init__(self, schema, doc, path):
         self.schema = schema
         self.doc = doc
         self.path = str(path)
-        self.tables = {}            # file_key -> {字段: spec}（保持 schema 属性顺序）
-        self.props = {}             # file_key -> schema 属性定义
+        self.tables = {}            # file_key -> {field: spec} (keeps schema attribute order)
+        self.props = {}             # file_key -> schema attribute definition
         self.entities = {}          # file_key -> schema entity
-        self.order = []             # file_key 顺序（schema entities 顺序）
-        self.cards_key = None       # 卡片表的 file_key
-        self.quote_key = {}         # file_key -> 引文对象的字段名（schema 里唯一的 object 属性）
-        self.quote_text_key = {}    # file_key -> 引文正文子键（object 的第一个 required 子字段）
-        self.pos_field = {}         # file_key -> 偏移字段名（derive=offset_from_quote 的那个字段）
-        self.temp_fields = {}       # task-68 ①：file_key -> {临时字段名: spec}（不在 schema，读完 pop）
-        self.hint_field = {}        # task-68 ①：file_key -> 用来显式指定所属事件的临时字段名
-        self.mention_tables = set()  # task-70 ①：event_id 可选（nullable）的表 = mention 表
-        self.nullable_fields = []    # task-70 ②：可空字段清单（进 report，便于人核）
-        self.report = {}            # 一致性 check 报告
+        self.order = []             # file_key order (schema entities order)
+        self.cards_key = None       # the card table's file_key
+        self.quote_key = {}         # file_key -> the quote object's field name (the only object attribute in schema)
+        self.quote_text_key = {}    # file_key -> the quote body sub-key (the object's first required sub-field)
+        self.pos_field = {}         # file_key -> the offset field name (the field with derive=offset_from_quote)
+        self.temp_fields = {}       # file_key -> {temporary field name: spec} (not in schema, popped after read)
+        self.hint_field = {}        # file_key -> the temporary field name used to explicitly name the owning event
+        self.mention_tables = set()  # tables whose event_id is optional (nullable) = mention tables
+        self.nullable_fields = []    # nullable field list (into report, for human review)
+        self.report = {}            # consistency check report
 
     def pop_temp_fields(self, table, row):
-        """task-68 ①：把临时字段从行里 pop 出来（不落产物），返回 {字段名: 值}。
+        """Pop temporary fields out of the row (not into the output), returning {field name:
+        value}.
 
-        只 pop 声明过的字段；schema 属性一律不碰。调用点必须在 keep_known_fields 之前。
+        Only declared fields are popped; schema attributes are never touched. The call site
+        must be before keep_known_fields.
         """
         out = {}
         if not isinstance(row, dict):
@@ -1431,7 +1592,8 @@ class Rules:
 
 
 def load_rules(schema, path=None):
-    """读 extract_rules.json，与 schema 双向核对 + 跑一致性 check；任何不一致都抛 schema 错。"""
+    """Read extract_rules.json, cross-check against schema both ways + run the consistency
+    check; any inconsistency raises a schema error."""
     path = pathlib.Path(path) if path else DEFAULT_RULES
     doc = load_json(path, "extract_rules")
     entries = {k: v for k, v in doc.items() if not str(k).startswith("_")}
@@ -1439,7 +1601,8 @@ def load_rules(schema, path=None):
     problems = []
     reject_ok, warn_ok, fill_ok, null_ok = [], [], [], []
     seen = set()
-    # task-104 三：装载通用别名表（别名 -> canonical_id -> 规范名，中英同表，来源可追）
+    # load the generic alias table (alias -> canonical_id -> canonical name, one table for
+    # both languages, source traceable)
     alias_doc = doc.get("_identity_alias") or {}
     if not isinstance(alias_doc, dict):
         problems.append("_identity_alias: 必须是对象 {entries:[...]}")
@@ -1480,7 +1643,7 @@ def load_rules(schema, path=None):
             if on_missing not in ON_MISSING_VALUES:
                 problems.append("%s: on_missing=%r 不在 %s"
                                 % (key, on_missing, list(ON_MISSING_VALUES)))
-            # P208 一致性：required 与 on_missing 不能各说各话（task-64 的冲突就出在这）
+            # consistency: required and on_missing must not contradict each other
             if on_missing == "reject" and name not in required:
                 problems.append("%s: on_missing=reject 但 schema 没标 required"
                                 "（一致性规则：reject ⇒ required）" % key)
@@ -1490,9 +1653,9 @@ def load_rules(schema, path=None):
             if on_missing == "fill" and fill != "derived":
                 problems.append("%s: on_missing=fill 只能配 fill=derived（模型字段程序补不出）"
                                 % key)
-            # task-101 二（P331）：「缺省」≠「垃圾」——没时间信息时写 null，不是拒整片。
-            # 一致性规则：on_missing=null ⇒ schema 该字段必须显式标 nullable（一个来源说了算，
-            # 不许「代码说能空、schema 说必填」两份真相）。
+            # "default" != "garbage" — write null when there is no time info, not reject the piece.
+            # consistency rule: on_missing=null ⇒ schema must mark the field nullable (one source
+            # of truth; no "code says nullable, schema says required" split).
             if on_missing == "null":
                 if not (prop or {}).get("nullable"):
                     problems.append("%s: on_missing=null 但 schema 没标 nullable"
@@ -1500,11 +1663,13 @@ def load_rules(schema, path=None):
                 if fill not in FILL_VALUES:
                     problems.append("%s: on_missing=null 的 fill=%r 不在 %s"
                                     % (key, fill, list(FILL_VALUES)))
-            # task-70 ②（R12）：nullable 只能加在「schema 里非 required」的派生字段上——
-            # 可空与否由 schema.required 一个来源说了算，rules 只是声明「程序允许不写」
+            # nullable may only be added to a derived field that is "non-required in schema" —
+            # nullability is decided by schema.required (one source); rules only declare "the
+            # program may leave it unwritten"
             if spec.get("nullable"):
-                # task-101：on_missing=null 的字段允许留在 required——程序缺了就写 null
-                # （键一定在，「有没有这个信息」靠值表达），其它 nullable 字段仍须非 required
+                # a field with on_missing=null may stay in required — the program writes null
+                # when absent (the key always exists; "is there info" is expressed by the value);
+                # other nullable fields must still be non-required
                 if name in required and on_missing != "null":
                     problems.append("%s: nullable=True 但 schema 标了 required"
                                     "（一致性规则：nullable ⇒ 非 required，R12）" % key)
@@ -1523,7 +1688,7 @@ def load_rules(schema, path=None):
                 fill_ok.append(key)
             elif on_missing == "null":
                 null_ok.append(key)
-            # task-101 三（P331）：英文动作词别名——把别名解析器也写进 spec，代码不写死表名
+            # English action-word aliases — put the alias resolver in spec too, no hard-coded table name
             if spec.get("alias") and spec.get("alias") not in ALIASERS:
                 problems.append("%s: alias=%r 不是已实现的别名解析器 %s"
                                 % (key, spec.get("alias"), sorted(ALIASERS)))
@@ -1537,7 +1702,7 @@ def load_rules(schema, path=None):
                       "alias_inputs": spec.get("alias_inputs") or {},
                       "null_note": spec.get("null_note"),
                       "note": spec.get("note")}
-            # task-67 ①：rules 里声明的 enum 是 schema 枚举的镜像（扩枚举必须两边同步）
+            # the enum declared in rules is a mirror of the schema enum (widening must sync both)
             if "enum" in spec and list(spec.get("enum") or []) != list((prop or {}).get("enum") or []):
                 problems.append("%s: rules.enum 与 schema.enum 不一致（%r vs %r，扩枚举要两边同步）"
                                 % (key, spec.get("enum"), (prop or {}).get("enum")))
@@ -1545,12 +1710,13 @@ def load_rules(schema, path=None):
             if stored["derive"] == "offset_from_quote":
                 rules.pos_field[fk] = name
         rules.tables[fk] = table
-        # task-70 ①：哪张表的 event_id 可选（nullable）= 哪张表走 mention（名称提及）
+        # which table's event_id is optional (nullable) = which table goes mention (name mention)
         if (table.get("event_id") or {}).get("nullable"):
             rules.mention_tables.add(fk)
             rules.nullable_fields.append("%s.event_id" % fk)
-    # task-68 ①：临时字段（_temp_fields）——不在 schema，只用来从模型输出里取「关联事件位置」。
-    # 校验：表必须存在、字段名不能和 schema 属性撞、必须是 fill=model + on_missing=warn（可选）。
+    # temporary fields (_temp_fields) — not in schema, only used to pull 关联事件位置 out of the
+    # model output. Validation: the table must exist, the field name must not collide with a
+    # schema attribute, and it must be fill=model + on_missing=warn (optional).
     temp_doc = doc.get("_temp_fields") or {}
     if not isinstance(temp_doc, dict):
         problems.append("_temp_fields 必须是对象（{表.字段: spec}）")
@@ -1576,11 +1742,13 @@ def load_rules(schema, path=None):
         rules.temp_fields.setdefault(fk_name, {})[fname] = stored
         if spec.get("role") == TEMP_ROLE_FK_HINT:
             rules.hint_field[fk_name] = fname
-    # 反向：rules 里多出来的键 = schema 里没这个属性 -> 同样是 schema 错（加字段要两边对得上）
+    # reverse direction: keys in rules with no schema attribute -> likewise a schema error
+    # (adding a field must match on both sides)
     for key in entries:
         if key not in seen:
             problems.append("%s: schema 里没有这个「表.字段」（多声明同样是 schema 错）" % key)
-    # 引文对象：schema 说 required 的子字段才必填，其余子字段（如 quote.归一化）按选填 strip
+    # quote object: only sub-fields schema marks required are mandatory; other sub-fields
+    # (like quote.归一化) are stripped as optional
     for fk, qkey in rules.quote_key.items():
         if not qkey:
             continue
@@ -1597,7 +1765,7 @@ def load_rules(schema, path=None):
                                      for n, s in tbl.items() if s.get("alias")],
                     "nullable_fields": list(rules.nullable_fields),
                     "mention_tables": sorted(rules.mention_tables),
-                    # task-104 三：别名表自述——几个别名、几个规范名、中英各几条、来源在不在
+                    # alias-table self-description — how many aliases / canonical names / per-language counts / whether sources are present
                     "identity_alias": {
                         "aliases": len(ALIAS_TABLE),
                         "canonical_ids": len(ALIAS_CANONICAL),
@@ -1619,22 +1787,26 @@ def load_rules(schema, path=None):
     return rules
 
 
-# ---------------------------------------------------------------- 派生算法（derive 名 -> 实现）
+# ---------------------------------------------------------------- derive algorithms (derive name -> implementation)
 #
-# 这里只写「某个字段怎么算」。哪个字段属于哪档、要不要补，全由 extract_rules.json 决定；
-# 算法要读哪些别的字段，也由 rules 的 inputs 给出（所以本文件不出现字段名字面量）。
+# Only "how to compute some field" lives here. Which field belongs to which tier, and
+# whether to fill it, is decided by extract_rules.json; which other fields an algorithm
+# reads is given by rules' inputs (so no field-name literal appears in this file).
 
 def canonical_key(raw):
-    """R11：canonical_id 的派生值 = 「完整原文写法」的规范化形式（NFKC + 去空白）。"""
+    """R11: canonical_id's derived value = the normalized form of 完整原文写法 (NFKC + strip
+    whitespace)."""
     return norm_ws(unicodedata.normalize("NFKC", str(raw))) or None
 
 
-# task-104 三（P342）：**通用别名表**——别名 -> canonical_id -> 规范名，中英进同一张表。
-# 背景：throughput 与 吞吐量 各自成 canonical_id，join 时串不成同一个指标；中文内部也有
-# 「成功次数」vs「通过用例数」同型问题。表在 extract_rules.json 的 identity_alias.entries，
-# 每条带 lang + source（来源可追）；表里没有的写法退回原文规范化（旧口径不变）。
-ALIAS_TABLE = {}      # 别名(NFKC+lower) -> {canonical_id, canonical_name, lang, source}
-ALIAS_CANONICAL = {}  # canonical_id -> 规范名
+# **Generic alias table** — alias -> canonical_id -> canonical name, both languages in one
+# table. Background: throughput and 吞吐量 each become their own canonical_id and cannot
+# join into one metric; the same problem exists inside Chinese (成功次数 vs 通过用例数).
+# The table is extract_rules.json's identity_alias.entries, each entry carrying lang +
+# source (traceable); a form absent from the table falls back to source normalization (old
+# criterion unchanged).
+ALIAS_TABLE = {}      # alias(NFKC+lower) -> {canonical_id, canonical_name, lang, source}
+ALIAS_CANONICAL = {}  # canonical_id -> canonical name
 
 
 def alias_norm(s):
@@ -1642,7 +1814,8 @@ def alias_norm(s):
 
 
 def set_alias_table(entries):
-    """装载别名表（load_rules 调）；返回校验问题列表（重复别名/缺字段都是表错）。"""
+    """Load the alias table (called by load_rules); returns the list of validation problems
+    (duplicate alias / missing field are table errors)."""
     global ALIAS_TABLE, ALIAS_CANONICAL
     ALIAS_TABLE, ALIAS_CANONICAL = {}, {}
     problems = []
@@ -1665,11 +1838,14 @@ def set_alias_table(entries):
 
 
 def resolve_canonical(raw):
-    """别名表 -> canonical_id；**表里没有 => None（查不到就说不认识，不许原样存档）**。
+    """Alias table -> canonical_id; **absent from table => None (say "unknown", never store
+    as-is)**.
 
-    task-107 一（最高优先级，污染型）：旧口径「表里没有就退回原文规范化」等于把猜测当事实——
-    任何临时字符串都变成看起来正常的 canonical_id，之后永远 join 不上却没人发现。
-    现在的口径：canonical_id 只能来自表；查不到 => canonical_id=null + unresolved=true。
+    Highest priority, pollution type: the old criterion "absent from table -> fall back to
+    source normalization" turned guesswork into fact — any transient string became a
+    canonical_id that looked normal, then never joined and nobody noticed. The current
+    criterion: canonical_id may only come from the table; not found =>
+    canonical_id=null + unresolved=true.
     """
     if not _nonempty(raw):
         return None
@@ -1680,42 +1856,46 @@ def resolve_canonical(raw):
 
 
 def is_canonical_registered(canonical_id):
-    """这个 canonical_id 是不是表里登记过的（null / 表外值都算没登记）。"""
+    """Whether this canonical_id is registered in the table (null / values outside the
+    table both count as unregistered)."""
     if not _nonempty(canonical_id):
         return False
     return str(canonical_id) in ALIAS_CANONICAL
 
 
 def canonical_name_of(canonical_id):
-    """canonical_id -> 规范名（表里没有 -> None，不猜）。"""
+    """canonical_id -> canonical name (None if absent from the table, no guessing)."""
     return ALIAS_CANONICAL.get(str(canonical_id or ""))
 
 
-# task-107 一（P347 补）：**下游不许「用完就丢」**。
-# 旧口径：canonical_id=null 的行进不了任何组，聚合/检索少 N 条却看起来正常 = 静默减少。
-# 现在：① 单独计数 unresolved_rows；② 答案里能说「另有 N 条名称未识别」。判据：
-# 带 1 条未登记名称跑聚合 => unresolved_rows=1（不是悄悄少 1）。
+# **Downstream must not "use it and drop it"**.
+# Old criterion: rows with canonical_id=null enter no group, so aggregation/retrieval
+# silently loses N rows while looking normal = silent reduction. Now: ① count
+# unresolved_rows separately; ② the answer can say "N more names were unrecognized".
+# Criterion: run aggregation with 1 unregistered name => unresolved_rows=1 (not a quiet −1).
 UNRESOLVED_ROWS_KEY = "unresolved_rows"
 
 
 def count_unresolved_rows(entities, table=None):
-    """数「名称没登记」的行（unresolved=true）；table=None 数全部表。"""
+    """Count rows whose "name is unregistered" (unresolved=true); table=None counts all tables."""
     tables = [table] if table else list(entities or {})
     return sum(1 for t in tables for r in ((entities or {}).get(t) or [])
                if isinstance(r, dict) and r.get("unresolved") is True)
 
 
 def unresolved_note(n):
-    """能贴进答案的人话缺口声明（0 条也照实说，不藏）。"""
+    """A human-readable gap statement that can go into the answer (0 is stated as-is, not hidden)."""
     return "另有 %d 条名称未识别（canonical_id=null，未参与归组）" % n
 
 
 def aggregate_by_identity(entities, rules=None, table="identities",
                           group_field="canonical_id"):
-    """按规范名聚合；unresolved 行单独计数，**不静默跳过**（task-107 一 / P347 补）。
+    """Aggregate by canonical name; unresolved rows are counted separately, **never skipped
+    silently**.
 
-    返回 groups（每个登记过的 canonical_id 一组：行数 + 来源 chunk）、
-    unresolved_rows（没登记、进不了组的行数）、note（带进答案的缺口声明）。
+    Returns groups (each registered canonical_id is one group: row count + source chunks),
+    unresolved_rows (unregistered rows that cannot enter a group), note (the gap statement
+    carried into the answer).
     """
     groups, unresolved = {}, 0
     rows = [r for r in ((entities or {}).get(table) or []) if isinstance(r, dict)]
@@ -1738,12 +1918,14 @@ def aggregate_by_identity(entities, rules=None, table="identities",
 
 
 def scope_unresolved_rows(scope=None, table="identities"):
-    """全库（或显式集合）里 unresolved 行总数——检索侧把缺口说出来用。"""
+    """Total unresolved rows across the whole library (or an explicit set) — for the
+    retrieval side to state the gap."""
     _, entries = lookup_scope_entries(scope)
     return sum(count_unresolved_rows(e["entities"], table=table) for e in entries)
 
 def _locate_quote(row, chunk, ctx):
-    """按 rules 取引文字段名/正文子键名，再回原文定位（抽取位置的唯一来源，R9）。"""
+    """Take the quote field name / body sub-key name from rules, then locate in source (the
+    sole source of the extraction position, R9)."""
     rules, table = ctx["rules"], ctx["table"]
     qkey, tkey = rules.quote_key.get(table), rules.quote_text_key.get(table)
     if not qkey or not tkey:
@@ -1761,7 +1943,7 @@ def _derive_source_chunk_id(row, spec, chunk, ctx):
 
 
 def _derive_time_ref(row, spec, chunk, ctx):
-    # task-102：time_ref = 本行可用的最细基准（turn>session>chunk）；三级都没有 -> None
+    # time_ref = the finest base available for this row (turn>session>chunk); none of the three -> None
     return chunk.get("_base_iso") or chunk.get("time_ref")
 
 
@@ -1773,11 +1955,12 @@ def _derive_time_norm(row, spec, chunk, ctx):
 
 
 def _derive_time_precision(row, spec, chunk, ctx):
-    """task-103 一：这行的原文时间精度（day/minute/second/unknown）；没有 time_raw -> null。
+    """This row's source time precision (day/minute/second/unknown); no time_raw -> null.
 
-    task-107 五(a)：**「解不出」和「只知道到日」不是一回事**——有 time_raw 但 time_norm 为空
-    （口语模糊写法 dateparser 真解不了）时精度记 unknown，不记 day/minute（记 day 等于对下游
-    撒谎说「我知道这是哪天」）。没有 time_raw 才是 null。
+    **"Unparseable" is not "only known to the day"** — with a time_raw but empty time_norm
+    (colloquial vague phrasing dateparser really cannot parse), precision records unknown,
+    not day/minute (recording day lies to downstream: "I know which day this is"). Only no
+    time_raw is null.
     """
     inputs = spec.get("inputs") or {}
     raw = row.get(inputs.get("raw") or TIME_RAW_FIELD)
@@ -1809,15 +1992,16 @@ def _derive_fk_event_id(row, spec, chunk, ctx):
 
 
 def _derive_canonical_from_raw_writing(row, spec, chunk, ctx):
-    # task-104 三：先查别名表（中英同表）；task-107 一：表里没有 => None（不再退回原文规范化）
+    # first check the alias table (both languages); absent from table => None (no fallback to source normalization)
     return resolve_canonical(row.get(spec["inputs"].get("raw")))
 
 
 def _derive_unresolved_from_canonical(row, spec, chunk, ctx):
-    """task-107 一：canonical_id 查不到（null）且原文写法不为空 => unresolved=true。
+    """canonical_id not found (null) and source writing not empty => unresolved=true.
 
-    「查不到」必须是**显式状态**，不能靠「canonical_id 恰好是空」去猜——下游 join 时
-    看到 null 就跳过，看到 true 就知道这行是「认识这个名字但没登记」。
+    "Not found" must be an **explicit state**, not inferred from "canonical_id happens to
+    be empty" — downstream join skips on null, but on true it knows this row is "recognized
+    the name but it was unregistered".
     """
     inputs = spec.get("inputs") or {}
     raw = row.get(inputs.get("raw") or "完整原文写法")
@@ -1828,17 +2012,18 @@ def _derive_unresolved_from_canonical(row, spec, chunk, ctx):
 
 
 def _derive_base_source(row, spec, chunk, ctx):
-    """task-102 三：这行用的是哪个字段当相对时间基准（turn_time/session_time/time_ref）。"""
+    """Which field this row uses as its relative-time base (turn_time/session_time/time_ref)."""
     return chunk.get("_base_source")
 
 
 def _derive_base_granularity(row, spec, chunk, ctx):
-    """task-102 三：基准粒度 turn/session/chunk（三级取最细）。"""
+    """Base granularity turn/session/chunk (finest of the three)."""
     return chunk.get("_base_granularity")
 
 
 def _derive_time_uncertain(row, spec, chunk, ctx):
-    """task-102 三：有 time_raw 却推不出 time_norm（含基准缺失）= 时间不确定（不是造假）。"""
+    """Has time_raw but cannot derive time_norm (including a missing base) = time uncertain
+    (not fabricated)."""
     inputs = spec.get("inputs") or {}
     raw = row.get(inputs.get("raw") or TIME_RAW_FIELD)
     norm = row.get(inputs.get("norm") or TIME_NORM_FIELD)
@@ -1859,14 +2044,15 @@ DERIVERS = {
     "base_granularity": _derive_base_granularity,
     "time_uncertain": _derive_time_uncertain,
 }
-# 派生执行顺序（dict 保序）：先块级/定位，再 event_id 外键，最后规范名
+# derive execution order (dict-ordered): block-level/locating first, then event_id foreign
+# key, then canonical name last
 DERIVE_ORDER = tuple(DERIVERS)
 
 
-# ---------------------------------------------------------------- 空字段 strip / 硬拒（档位由 rules 决定）
+# ---------------------------------------------------------------- empty-field strip / hard reject (tier from rules)
 
 def _is_blank(v):
-    """空字段判定：None / 空串 / 全空白串。"""
+    """Empty-field check: None / empty string / all-whitespace string."""
     return v is None or (isinstance(v, str) and not v.strip())
 
 
@@ -1875,10 +2061,12 @@ def _nonempty(v):
 
 
 def strip_optional_empty(row, table, rules, where, warnings, piece=None):
-    """C 档：on_missing=warn 的字段为空 -> strip + warning（strip 必须跑在必填校验之前）。
+    """Tier C: a field with on_missing=warn that is empty -> strip + warning (strip must run
+    before required-field validation).
 
-    对象字段（quote）内部的非 required 子字段（如 quote.归一化）同样「空则 strip」——
-    它们可选与否由 schema 的 quote.required 决定（R11 只留 原文）。
+    Non-required sub-fields inside an object field (quote), like quote.归一化, are likewise
+    "strip when empty" — their optionality is decided by schema's quote.required (R11 keeps
+    only 原文).
     """
     if not isinstance(row, dict):
         return row
@@ -1905,14 +2093,15 @@ def strip_optional_empty(row, table, rules, where, warnings, piece=None):
     return row
 
 
-# task-73 ①：这些字段不是「行里的事实」，不能拿来当文字锚点（引文/偏移/派生 id/输入侧参数）
+# these fields are not "facts of the row" and cannot serve as text anchors (quote/offset/derived id/input-side parameters)
 TEXT_ANCHOR_SKIP = ("source_chunk_id", "time_norm", "time_precision", "time_ref",
                     "event_id", "抽取位置",
                     "canonical_id", "quote", "类型")
 
 
 def _row_text_anchors(row):
-    """行里能回原文核对的文字锚点（名称/指标名/值/等式/action…），长的优先（更具体）。"""
+    """Text anchors in the row that can be checked back against the source (name/metric
+    name/value/equation/action…), longer first (more specific)."""
     anchors = []
     for key, val in row.items():
         if key in TEXT_ANCHOR_SKIP or str(key).startswith("__"):
@@ -1932,9 +2121,11 @@ def _row_text_anchors(row):
 
 
 def _derive_offset_from_row_text(row, chunk, scope):
-    """task-73 ①：没有 quote 时用行里的文字锚点回原文找位置（行照抽，位置由程序补）。
+    """Without a quote, use the row's text anchors to find a position in the source (the row
+    is still extracted; the position is filled by the program).
 
-    找不到返回 (None, None)——调用方把该行记进 unlocated_rows，不静默丢。
+    Not found returns (None, None) — the caller records the row in unlocated_rows, never
+    silently dropped.
     """
     text = chunk["text"]
     a, b = scope
@@ -1946,11 +2137,14 @@ def _derive_offset_from_row_text(row, chunk, scope):
 
 
 def _check_quote_offset(row, chunk, scope, rules, table, where, warnings=None):
-    """B 档结构规则：有偏移必须有能命中的引文；没偏移时先按引文定位，再退到文字锚点。
+    """Tier B structural rule: an offset must have a matching quote; without an offset, first
+    locate by quote, then fall back to text anchors.
 
-    task-73 ①：「给不出 quote」不再是删行指令——行照抽，位置由程序补（缺 quote 只记 warning），
-    连文字锚点都找不到的行记进 unlocated_rows + warning，绝不静默消失。
-    引文字段名/正文子键名/偏移字段名全部来自 schema + rules，本函数不写死任何字段名。
+    "No quote available" is no longer a delete-row instruction — the row is still extracted,
+    the position filled by the program (missing quote only records a warning); a row that
+    also finds no text anchor is recorded in unlocated_rows + warning, never silently
+    vanishes. The quote field name / body sub-key / offset field name all come from schema +
+    rules; this function hard-codes no field name.
     """
     warnings = warnings if warnings is not None else []
     qkey = rules.quote_key.get(table)
@@ -1974,9 +2168,9 @@ def _check_quote_offset(row, chunk, scope, rules, table, where, warnings=None):
                                 % (where, pos_field, pos, label))
         return
     if located is not None:
-        row[pos_field] = located  # A 档：由引文定位补偏移
+        row[pos_field] = located  # tier A: fill the offset by locating the quote
         return
-    # task-73 ①：没有 quote 也没有偏移 —— 行不丢，先试文字锚点
+    # no quote and no offset — the row is not dropped, first try text anchors
     derived, anchor = _derive_offset_from_row_text(row, chunk, scope)
     if derived is not None:
         row[pos_field] = derived
@@ -1991,7 +2185,8 @@ def _check_quote_offset(row, chunk, scope, rules, table, where, warnings=None):
 
 
 def _missing(v):
-    """「缺了」判定（与类型无关）：None / 空串 / 全空白串 / 空列表 / 空对象。"""
+    """"Missing" check (type-independent): None / empty string / all-whitespace string / empty
+    list / empty object."""
     if v is None:
         return True
     if isinstance(v, str):
@@ -2002,7 +2197,8 @@ def _missing(v):
 
 
 def _validate_row(table, row, chunk, scope, rules, where, warnings=None):
-    """B 档硬拒：on_missing=reject 的字段缺失/空串 + 引文/偏移结构坏。抛 PieceRejected = 重试该片。"""
+    """Tier B hard reject: a field with on_missing=reject that is missing/empty + a broken
+    quote/offset structure. Raising PieceRejected = retry this piece."""
     for name, spec in rules.tables[table].items():
         if spec["on_missing"] == "reject" and _missing(row.get(name)):
             raise PieceRejected("%s: 必填字段 %r 缺失/空串（on_missing=reject，不 strip）"
@@ -2011,14 +2207,18 @@ def _validate_row(table, row, chunk, scope, rules, where, warnings=None):
 
 
 def validate_piece(doc, chunk, scope, rules, warnings, piece=None, unlocated=None):
-    """B 档：整片输出先过校验；过不了抛 PieceRejected（触发重试该片）。
+    """Tier B: the whole piece output is validated first; failure raises PieceRejected
+    (triggering a retry of that piece).
 
-    返回被丢掉的「数值型 reject 字段为空」的行数（⑤ 原行为：数值行命根为空 -> 整条丢，
-    不算 warning 也不算拒）。档位判定全部来自 rules，本函数只按属性执行。
-    校验会对 doc 原地做 C 档 strip（A 档补全在 normalize 里做）。
+    Returns the count of rows dropped for "numeric reject field empty" (the original
+    behavior: a numeric row's essential value is empty -> drop the whole row, neither a
+    warning nor a reject). Tier decisions all come from rules; this function only executes
+    per attribute. Validation does tier-C strip on doc in place (tier-A completion happens
+    in normalize).
 
-    task-73 ①：既无偏移又无文字锚点的行不再硬拒（那等于「缺引文就删行」），
-    而是记进 unlocated 列表（不落产物、但也不静默丢，报告里有它）。
+    Rows with neither offset nor text anchor are no longer hard-rejected (that would equal
+    "missing quote => delete row"); they are recorded into the unlocated list (not into the
+    output, but not silently dropped — the report has them).
     """
     if not isinstance(doc, dict):
         raise PieceRejected("模型输出顶层必须是对象，实际 %s" % type(doc).__name__)
@@ -2043,7 +2243,7 @@ def validate_piece(doc, chunk, scope, rules, warnings, piece=None, unlocated=Non
                 if not _missing(val):
                     continue
                 if spec.get("type") == "number" and isinstance(val, str):
-                    dropped += 1  # ⑤ 原行为：数值行 值 是空串 -> 整条丢（不报错不记 warning）
+                    dropped += 1  # original behavior: numeric row value is an empty string -> drop the whole row (no error, no warning)
                     drop = True
                     break
                 raise PieceRejected("%s: 必填字段 %r 缺失/空串（on_missing=reject，不 strip）"
@@ -2063,12 +2263,14 @@ def validate_piece(doc, chunk, scope, rules, warnings, piece=None, unlocated=Non
 
 
 def quote_ratio_of(entities, tables=None, quote_missing=None):
-    """四表 quote 占比（task-74 分母 A：0.95 只统计「能给出 quote 的行」）。
+    """Four-table quote ratio (denominator A: 0.95 only counts "rows that can give a quote").
 
-    quote_missing = 已登记缺引文的行（每项 {"table","where",...}，见 quote_missing_of）：
-      ratio     = with_quote / (rows − quote_missing)   <- 闸只看这个
-      gap_ratio = quote_missing / rows                  <- 「引文缺口」独立指标，不进闸
-    缺 quote 又没登记的行会留在分母里、把 ratio 拖下去——静默缺口不许被平均掉。
+    quote_missing = rows registered as missing-quote (each {"table","where",...}, see
+    quote_missing_of):
+      ratio     = with_quote / (rows − quote_missing)   <- the gate only looks at this
+      gap_ratio = quote_missing / rows                  <- the "quote gap" is a separate metric, not gated
+    A row missing its quote yet unregistered stays in the denominator and drags ratio down
+    — a silent gap must not be averaged away.
     """
     total = 0
     with_quote = 0
@@ -2091,7 +2293,8 @@ def quote_ratio_of(entities, tables=None, quote_missing=None):
 
 
 def quote_missing_of(warnings):
-    """task-74：从行级 warning 里取「已登记缺引文」的行，单列成 quote_missing_rows（不与覆盖率混）。"""
+    """Take "registered missing-quote" rows from row-level warnings, listed separately as
+    quote_missing_rows (not mixed into coverage)."""
     rows = []
     for w in warnings or []:
         if not isinstance(w, dict) or w.get("code") != "quote_missing":
@@ -2103,41 +2306,50 @@ def quote_missing_of(warnings):
     return rows
 
 
-# ---------------------------------------------------------------- task-78：time_norm 可复算硬闸
+# ---------------------------------------------------------------- time_norm recomputation hard gate
 #
-# 背景（审查端 P234/P235）：event_id 做了可复算、唯一键做了字符偏移可复算，唯独**时间列**
-# 没纳入——而时间列是「取最新」的唯一依据，错了不表现在值上、表现在键上（跟 event_id
-# 当年「先没错、后来错了」才加坑同型）。所以按 event_id 复算同款加硬闸：
-#   * 存储的 time_norm 必须能由 (time_raw, time_ref) 按本文件归一化逻辑重算出来且逐字符一致；
-#   * 重算不符 = 红（不是 warning），由 main() 落成退出码 2（产物照落盘，留痕看得见哪一行错）；
-#   * 重算不出（缺 time_ref / time_raw 归一化解不出）= 也红：存了个无法复核的时间值，等于没键。
+# Background: event_id got recomputation, the unique key got character-offset recomputation,
+# but the **time column** was left out — and the time column is the sole basis for "take the
+# latest"; when it is wrong the error shows not in the value but in the key (same shape as
+# event_id's earlier "fine at first, wrong later" hole). So a hard gate was added, the same
+# style as event_id recomputation:
+#   * the stored time_norm must be reproducible from (time_raw, time_ref) by this file's
+#     normalization logic, character-for-character identical;
+#   * a recomputation mismatch = red (not a warning), turned into exit code 2 by main()
+#     (output still written; the trail shows which row is wrong);
+#   * unreproducible (missing time_ref / time_raw unparseable) = also red: storing a time
+#     value that cannot be re-verified is equivalent to having no key.
 
 TIME_NORM_FIELD = "time_norm"
 TIME_RAW_FIELD = "time_raw"
 TIME_REF_FIELD = "time_ref"
-TIME_PRECISION_FIELD = "time_precision"   # task-107 三：查询侧必须读它
+TIME_PRECISION_FIELD = "time_precision"   # the query side must read it
 TIME_UNCERTAIN_FIELD = "time_uncertain"
 
-# task-107 三：**查询侧字段契约**——凡是「答案里该出现的字段」，都要在这里登记一条。
-# 新增字段（比如 time_precision）= 必须同时配一条端到端断言（e2e_asserts.json 里有一条
-# 预期里含这个字段的断言），否则 extract() 直接报 schema 错（check_e2e_field_coverage）。
-# 机制的意义：单测证明「函数能返回字段」不算通，**从提问到答案真的读到它**才算通——
-# 这正是「time_precision 说改了、查询侧没读」的第二次（上次是 filter.time）。
+# **Query-side field contract** — every field that "should appear in the answer" registers an
+# entry here. A new field (like time_precision) must ship with an end-to-end assertion (one
+# assertion in e2e_asserts.json whose expectation contains the field), otherwise extract()
+# raises a schema error directly (check_e2e_field_coverage). The mechanism's point: a unit
+# test proving "the function returns the field" is not enough; **from question to answer,
+# actually reading it** is what counts — this is exactly the second occurrence of
+# "time_precision changed, query side didn't read it" (the first was filter.time).
 QUERY_FIELD_CONTRACT = ("值", "单位", "精度", TIME_NORM_FIELD, TIME_UNCERTAIN_FIELD, "来源")
 QUERY_PRECISION_KEY = "精度"
 QUERY_SOURCE_KEY = "来源"
 
 
 def time_norm_recompute(entities, rules, chunk):
-    """task-78：逐行重算 time_norm，返回可复算报告（rows_checked / reproduced / mismatch / 解不出）。
+    """Recompute time_norm row by row, returning a reproducibility report (rows_checked /
+    reproduced / mismatch / unparseable).
 
-    time_ref 取值顺序：行里存了就用行里的（metrics 走 derive 落了 time_ref），
-    否则用 chunk 的事件时间（cards 不存 time_ref；相对时间靠它解）。
+    time_ref resolution order: use the row's if stored (metrics derives time_ref), otherwise
+    the chunk's event time (cards don't store time_ref; relative time relies on it).
     """
     checked, reproduced = 0, 0
     null_rows, nulled_underivable = 0, []
     mismatch, unreproducible = [], []
-    # task-102 三：复算的基准必须和抽取时同一个（三级取最细），否则相对时间永远对不上
+    # the recomputation base must match the extraction base (finest of the three), otherwise
+    # relative time never matches
     chunk_ref = (chunk or {}).get("_base_iso") or (chunk or {}).get(TIME_REF_FIELD)
     tables = getattr(rules, "order", None) or list(entities)
     for table in tables:
@@ -2151,8 +2363,8 @@ def time_norm_recompute(entities, rules, chunk):
                 continue
             stored = row.get(TIME_NORM_FIELD)
             if _is_blank(stored):
-                # task-101 一（P331）：time_norm=null 是合法结果（没有/推不出时间信息），
-                # 但要看得见：统计「因为推不出而落了 null」的行数，别让 null 变成静默出口。
+                # time_norm=null is a legal result (no/underivable time info), but it must be
+                # visible: count rows that nulled because underivable, don't let null be a silent exit.
                 null_rows += 1
                 raw = row.get(raw_key)
                 if not _is_blank(raw):
@@ -2169,8 +2381,9 @@ def time_norm_recompute(entities, rules, chunk):
                 unreproducible.append({"where": where, "why": "缺 time_ref，相对时间无法解",
                                        "time_raw": raw, "stored": stored})
                 continue
-            # task-80（P239）：参照点断言——行里存了 time_ref 就必须等于 chunk 的 time_ref，
-            # 不等 = 红（参照点可随便填的话，相对时间怎么解都「对」）。
+            # reference-point assertion — a stored time_ref must equal the chunk's time_ref,
+            # mismatch = red (if the reference point could be arbitrary, relative time would
+            # resolve "correctly" no matter what).
             stored_ref = row.get(TIME_REF_FIELD)
             if (chunk_ref and isinstance(stored_ref, str) and stored_ref.strip()
                     and stored_ref != chunk_ref):
@@ -2189,7 +2402,7 @@ def time_norm_recompute(entities, rules, chunk):
                 continue
             reproduced += 1
     red = bool(mismatch) or bool(unreproducible)
-    den = checked + null_rows          # task-104 五：分母 = 该字段存在的行数（含 null）
+    den = checked + null_rows          # denominator = rows where the field exists (including null)
     return {"rows_checked": checked, "reproduced": reproduced,
             "den": den, "num": reproduced,
             "mismatch": len(mismatch), "mismatch_rows": mismatch,
@@ -2198,7 +2411,7 @@ def time_norm_recompute(entities, rules, chunk):
             "underivable_nulled": len(nulled_underivable),
             "underivable_rows": nulled_underivable[:50],
             "red": red, "ok": not red,
-            # task-104 五：分母=0 => unverified（未检验），不显示成通过
+            # denominator=0 => unverified, not shown as passing
             "verdict": "fail" if red else ("pass" if den else "unverified"),
             "algorithm": "time_norm == normalize_time(time_raw, time_ref)（与抽取器归一化同源）；"
                          "推不出 => time_norm=null（不是 red、也不许保留模型自报值，task-101）；"
@@ -2206,7 +2419,7 @@ def time_norm_recompute(entities, rules, chunk):
 
 
 def enforce_time_norm_reproducible(entities, rules, chunk, warnings=None):
-    """task-78：time_norm 复算硬闸——不符/解不出都报红（不是 warning）。"""
+    """time_norm recomputation hard gate — mismatch/unparseable both report red (not a warning)."""
     info = time_norm_recompute(entities, rules, chunk)
     if info["red"] and warnings is not None:
         head = "；".join("%s 存 %s 应为 %s" % (r["where"], r["stored"], r["recomputed"])
@@ -2222,7 +2435,7 @@ def enforce_time_norm_reproducible(entities, rules, chunk, warnings=None):
 
 
 def _iter_derived_rows(entities, rules, deriver):
-    """遍历「derive 等于 deriver 的字段」，产出 (table, name, spec, i, row)。"""
+    """Iterate "fields whose derive equals deriver", yielding (table, name, spec, i, row)."""
     for table in (getattr(rules, "order", None) or list(entities)):
         for name, spec in ((getattr(rules, "tables", {}) or {}).get(table) or {}).items():
             if spec.get("derive") != deriver:
@@ -2232,12 +2445,15 @@ def _iter_derived_rows(entities, rules, deriver):
                     yield table, name, spec, i, row
 
 
-# task-102 一 / task-104 一：可复算的派生字段清单（推导自检要能「用同一套规则从输入重算一次」）
+# reproducible derived-field list (the derivation self-check must be able to "recompute from
+# input by the same rules")
 RECOMPUTE_DERIVERS = ("time_norm", "time_precision", "canonical_from_raw_writing", "card_event_id")
 
-# task-104 一：派生字段自检**覆盖全部清单，不只时间**。除上面按 derive 重算的四个外，还有：
-#   op_type     动作词 -> 枚举（查 OP_TYPE_ALIAS 表，同一张表两边用）；
-#   值 / 单位    数值表达（正则 + 回原句对账）/ 单位（查 UNIT_KNOWN 表，或原句里逐字有）。
+# the derived-field self-check **covers the whole list, not just time**. Besides the four
+# recomputed by derive above, there are also:
+#   op_type     action word -> enum (look up OP_TYPE_ALIAS, the same table used on both sides);
+#   值 / 单位    numeric expression (regex + reconcile against the source sentence) / unit
+#               (look up UNIT_KNOWN, or the source sentence contains it verbatim).
 NUM_VALUE_RE = re.compile(r"^-?\d+(?:\.\d+)?$")
 UNIT_KNOWN = {
     "次", "个", "条", "行", "张", "份", "台", "人", "天", "小时", "分钟", "秒", "毫秒",
@@ -2249,7 +2465,8 @@ DERIVED_FIELD_NAMES = ("time_norm", "time_precision", "op_type", "canonical_id",
 
 
 def _table_of_field(rules, name):
-    """字段名 -> (表名, spec)；同一个名字可能出现在多张表（time_norm 就在三张表里）。"""
+    """Field name -> (table name, spec); the same name may appear in multiple tables (time_norm
+    is in three tables)."""
     out = []
     for table, specs in (getattr(rules, "tables", {}) or {}).items():
         if name in specs:
@@ -2258,7 +2475,7 @@ def _table_of_field(rules, name):
 
 
 def _quote_text_of(row, rules, table):
-    """取这一行的引文原文（quote.原文），拿来回原句对账。"""
+    """Take this row's quote source (quote.原文), for reconciling against the source sentence."""
     qkey = getattr(rules, "quote_key", {}).get(table)
     tkey = getattr(rules, "quote_text_key", {}).get(table)
     quote = row.get(qkey) if qkey else None
@@ -2268,10 +2485,12 @@ def _quote_text_of(row, rules, table):
 
 
 def unit_is_known(unit, quote=None):
-    """单位是否可用：表里有 / 复合单位（次/秒、MB/s）的每一段都在表里 / 原句里逐字有。
+    """Whether a unit is usable: in the table / every segment of a compound unit (次/秒, MB/s)
+    is in the table / the source sentence contains it verbatim.
 
-    task-104 一⑤：单位是派生自「数值表达」的字段，必须能查表复算——但「次/秒」这种复合写法
-    不该被单位表漏掉（按 `/` `·` 拆开逐段判，比穷举整串单位名可靠）。
+    The unit is a field derived from the "numeric expression" and must be table-recomputable
+    — but a compound form like "次/秒" must not be missed by the unit table (split on `/` `·`
+    and judge per segment, more reliable than exhaustively listing whole unit strings).
     """
     u = unicodedata.normalize("NFKC", str(unit or "")).strip()
     if not u:
@@ -2287,7 +2506,8 @@ def unit_is_known(unit, quote=None):
 
 
 def _extra_derived_assertions(entities, rules, chunk):
-    """task-104 一：op_type / 值 / 单位的推导自检（产出与 DERIVERS 同格式的不符条目）。"""
+    """op_type / 值 / 单位 derivation self-check (produces mismatch entries in the same
+    format as DERIVERS)."""
     out = []
     for table, spec in _table_of_field(rules, "op_type"):
         for i, row in enumerate(entities.get(table) or [], 1):
@@ -2295,11 +2515,12 @@ def _extra_derived_assertions(entities, rules, chunk):
                 continue
             stored = row.get("op_type")
             src = row.get("action") or row.get("target")
-            # task-107 四：**只看 action**（模型写的动作描述）——拿 quote 里的叙事连接词
-            # （Then I went through ...）去回填会把「填了数据」判成「读了一遍」，那是把闸建在噪声上。
+            # **look only at action** (the action description the model wrote) — backfilling from
+            # narrative connectives in quote (Then I went through ...) would judge "filled data"
+            # as "read through it", building the gate on noise.
             want = alias_op_type(src)
             if want == OP_ALIAS_DEFAULT:
-                continue  # 表里没有这个动作词：允许留在 other，不硬判
+                continue  # this action word is absent from the table: allowed to stay other, not hard-judged
             if str(stored or "") != str(want):
                 out.append({"field": "op_type", "where": "%s[#%d].op_type" % (table, i),
                             "stored": stored, "recomputed": want,
@@ -2313,8 +2534,9 @@ def _extra_derived_assertions(entities, rules, chunk):
             quote = _quote_text_of(row, rules, table)
             val = row.get("值")
             sval = "" if val is None else str(val).strip()
-            # task-104 一⑤：值 的自检是「数值表达」结构检查（正则），不是回原句逐字对账——
-            # 回原句属于剪贴字段（quote/time_raw）那一级，混进来会把合成夹具全判红。
+            # 值's self-check is a "numeric expression" structural check (regex), not a verbatim
+            # reconcile against the source sentence — that belongs to verbatim fields
+            # (quote/time_raw); mixing it in would flag all synthetic fixtures red.
             if not NUM_VALUE_RE.match(sval):
                 out.append({"field": "值", "where": where + ".值", "stored": val,
                             "recomputed": None,
@@ -2332,10 +2554,12 @@ def _extra_derived_assertions(entities, rules, chunk):
 
 
 def recompute_derived(entities, rules, chunk):
-    """task-102 一② / task-104 一：逐行重算派生字段，和存的值逐字符比；不一致 = 静默造假/键错。
+    """Recompute derived fields row by row and compare character-for-character with the stored
+    value; mismatch = silent fabrication / key error.
 
-    task-104 一：覆盖**全部派生字段清单**（时间、精度、动作类型、规范名、值、单位），
-    不再只核时间——黑名单只挡已知危险，全字段自检才是真兜底。
+    Covers the **whole derived-field list** (time, precision, action type, canonical name,
+    value, unit), no longer only time — the blacklist only blocks known dangers, the
+    whole-field self-check is the real safety net.
     """
     checked, reproduced = 0, 0
     missing, mismatch = [], []
@@ -2347,7 +2571,7 @@ def recompute_derived(entities, rules, chunk):
             stored = row.get(name)
             try:
                 want = DERIVERS[deriver](row, spec, chunk, {})
-            except Exception as exc:  # noqa: BLE001  重算本身崩了也要看得见
+            except Exception as exc:  # noqa: BLE001  a crash in the recomputation itself must also be visible
                 mismatch.append({"where": where, "why": "重算异常 %s" % type(exc).__name__,
                                  "stored": stored, "field": name})
                 per_field.setdefault(name, {"checked": 0, "reproduced": 0,
@@ -2379,7 +2603,7 @@ def recompute_derived(entities, rules, chunk):
                 continue
             reproduced += 1
             per_field[name]["reproduced"] += 1
-    # task-104 一：另外两个派生字段（op_type / 值 / 单位）走表/正则自检，口径一致
+    # the other derived fields (op_type / 值 / 单位) go through table/regex self-check, same criterion
     for item in _extra_derived_assertions(entities, rules, chunk):
         name = item["field"]
         checked += 1
@@ -2397,14 +2621,16 @@ def recompute_derived(entities, rules, chunk):
 
 
 def enforce_time_precision_consistent(entities, rules, warnings=None):
-    """task-107 五(b)：**精度的实现错必须修**——精度和 time_norm 必须自洽。
+    """**The precision implementation bug must be fixed** — precision and time_norm must be
+    self-consistent.
 
-    判据（可精确判定 => 闸，不是 warning）：
-      * 有 time_norm 且只到日（YYYY-MM-DD）      => precision 必须 day；
-      * 有 time_norm 且带时刻                    => precision 必须 minute/second；
-      * 有 time_raw 但 time_norm 为空            => precision 必须 unknown（不是 day/minute）；
-      * 没有 time_raw                            => precision 必须空（None，键可省）。
-    这四条正是「精度标错了但我们自己没发现」的形状：day 配时刻、minute 配日期、null 配 day。
+    Criteria (precisely decidable => gate, not a warning):
+      * has time_norm and date-only (YYYY-MM-DD)      => precision must be day;
+      * has time_norm and a clock time                 => precision must be minute/second;
+      * has time_raw but empty time_norm               => precision must be unknown (not day/minute);
+      * no time_raw                                    => precision must be empty (None, key omittable).
+    These four are exactly the shape of "precision mislabeled but we didn't notice": day with
+    a clock time, minute with a date, null with day.
     """
     warnings = warnings if warnings is not None else []
     mism = []
@@ -2426,10 +2652,10 @@ def enforce_time_precision_consistent(entities, rules, warnings=None):
             elif _is_blank(norm):
                 want = "unknown"
                 ok = (prec == "unknown")
-            elif len(str(norm).strip()) == 10:      # YYYY-MM-DD，只有日期
+            elif len(str(norm).strip()) == 10:      # YYYY-MM-DD, date only
                 want = "day"
                 ok = (prec == "day")
-            else:                                    # 带时刻：minute / second 都合法
+            else:                                    # has a clock time: minute / second both legal
                 want = "minute|second"
                 ok = prec in ("minute", "second")
             if ok:
@@ -2453,13 +2679,16 @@ def enforce_time_precision_consistent(entities, rules, warnings=None):
 
 
 def traceability_assert(entities, rules, chunk, trace_hits=None, warnings=None):
-    """task-102 一：**可追溯性断言**（统一入口，新字段进来都过一遍）。
+    """**Traceability assertion** (unified entry — every new field goes through it).
 
-    ① 剪贴自检：verbatim 字段（time_raw）必须逐字出现在 source_chunk 原文里。
-       改写（yesterday -> 昨天）在归一化时就已经置 null 并记 warning；这里把违规逐行汇总。
-       注：违规已被置 null，产物里不会留下假值，所以不翻退出码（与 task-101 的 rc=0 契约一致），
-       但必须看见——violations>0 就是「模型改写过」的铁证。
-    ② 推导自检：派生字段用同一套规则重算并与存值比对，不一致 = 红。
+    ① verbatim self-check: verbatim fields (time_raw) must appear character-for-character in
+       the source_chunk source. Rewrites (yesterday -> 昨天) were already nulled with a
+       warning at normalization; here violations are aggregated row by row. Note: violations
+       were already nulled, so the output holds no fake value, thus no exit-code flip (the
+       rc=0 contract); but they must be visible — violations>0 is hard evidence of "the model
+       rewrote".
+    ② derivation self-check: derived fields are recomputed by the same rules and compared
+       with the stored value; mismatch = red.
     """
     hits = list(trace_hits or [])
     verbatim_fields = ["%s.%s" % (fk, n)
@@ -2502,7 +2731,8 @@ SPAN_ALARM_HOURS = 24.0
 
 
 def span_alarm_of(entities, rules, chunk, warnings=None):
-    """task-102 三：跨度报警——chunk 内 time_norm 跨度 > 24h 且含相对时间 => chunk 级基准不可信。"""
+    """Span alarm — in-chunk time_norm span > 24h and containing relative time => the
+    chunk-level base is unreliable."""
     from datetime import datetime
     times, relative_rows = [], []
     raw_key = TIME_RAW_FIELD
@@ -2542,15 +2772,16 @@ def span_alarm_of(entities, rules, chunk, warnings=None):
     return info
 
 
-QUOTE_INVALID = "quote_invalid"          # task-107 二：运行时子串校验没过（降级留痕）
-QUOTE_INVALID_RETRIED = "quote_invalid_retried"  # 重试过一次仍不过
+QUOTE_INVALID = "quote_invalid"          # runtime substring check failed (degradation trail)
+QUOTE_INVALID_RETRIED = "quote_invalid_retried"  # retried once and still failed
 
 
 def quote_sub_fields(row, rules, table):
-    """(子字段名, 值) 列表：这一行的 quote 里所有**字符串**子字段（不止 原文）。
+    """(sub-field name, value) list: all **string** sub-fields of this row's quote (not only 原文).
 
-    task-107 二：check_2_quote 卡的是「quote 每个字符串子字段都要能在原文里 grep 到」，
-    旧运行时闸只查 quote.原文 一个，于是 8 张卡的 quote.归一化 是中文改写却一路绿灯。
+    check_2_quote gates on "every string sub-field of quote must be greppable in the source";
+    the old runtime gate only checked quote.原文, so 8 cards' quote.归一化 were Chinese
+    rewrites yet passed all the way through.
     """
     qkey = rules.quote_key.get(table)
     quote = row.get(qkey) if qkey else None
@@ -2560,7 +2791,8 @@ def quote_sub_fields(row, rules, table):
 
 
 def _substring_norm(s):
-    """子串比对口径：NFKC + 去所有空白（与 check_2_quote 的 norm() 同一口径）。"""
+    """Substring comparison criterion: NFKC + strip all whitespace (same criterion as
+    check_2_quote's norm())."""
     s = unicodedata.normalize("NFKC", str(s))
     for ch in " \t\r\n\u3000\u00a0\ufeff\u200b":
         s = s.replace(ch, "")
@@ -2568,10 +2800,11 @@ def _substring_norm(s):
 
 
 def quote_substring_violations(entities, rules, text):
-    """逐行逐子字段查「quote 是不是 source_chunk 的连续子串」，返回违规清单（不改数据）。
+    """Check row by row, sub-field by sub-field whether "quote is a contiguous substring of
+    source_chunk", returning the violation list (no data change).
 
-    返回 [{"table","index","where","field","value","anchor"}...]；anchor=True 表示
-    不过的是引文锚点（原文），False 表示辅助子字段（归一化这类）。
+    Returns [{"table","index","where","field","value","anchor"}...]; anchor=True means the
+    failing one is the quote anchor (原文), False means an auxiliary sub-field (归一化 type).
     """
     target = _substring_norm(text or "")
     out = []
@@ -2596,17 +2829,19 @@ def quote_substring_violations(entities, rules, text):
 
 
 def _quote_fields_checked(entities, rules):
-    """这四表里一共查了多少个 quote 字符串子字段（分母，写进闸输出）。"""
+    """How many quote string sub-fields were checked across these tables (denominator, into
+    the gate output)."""
     return sum(len(quote_sub_fields(r, rules, t))
                for t in (getattr(rules, "order", None) or list(entities))
                for r in (entities.get(t) or []) if isinstance(r, dict))
 
 
 def quote_substring_report(entities, rules, text, limit=50):
-    """task-108：**只读复算**——不丢行、不改字段，专门给 gate_final 用。
+    """**Read-only recompute** — drops no row, changes no field, specifically for gate_final.
 
-    与 enforce_quote_substring 同一个判定函数（quote_substring_violations），
-    区别只在：这个不洗数据，所以在**最终产物**上再算一次就是「这一格到底过没过」。
+    Uses the same judgment function as enforce_quote_substring (quote_substring_violations);
+    the only difference is it does not scrub data, so recomputing on the **final output**
+    answers "did this cell actually pass or not".
     """
     viol = quote_substring_violations(entities, rules, text)
     return {"kind": "gate_final",
@@ -2615,9 +2850,10 @@ def quote_substring_report(entities, rules, text, limit=50):
             "invalid": len(viol),
             "anchor_invalid": sum(1 for v in viol if v["anchor"]),
             "aux_invalid": sum(1 for v in viol if not v["anchor"]),
-            # task-109（审查端 P350）：计数器不许缺键——缺键读出来就是 None，会被当成「没问题」。
-            # 这一份是**只读复算**，它自己一行不丢、一个字段不删，所以三个计数**确实**是 0
-            # （不是「没数」），配 unverified=False 明确说清楚。
+            # counters must not be missing keys — a missing key reads as None and is treated as
+            # "no problem". This one is a **read-only recompute** that drops no row and deletes no
+            # field, so the three counters are **genuinely 0** (not "uncounted"), paired with
+            # unverified=False to state it clearly.
             "dropped_rows": 0, "dropped_cards": 0, "dropped_fields": 0,
             "unverified": False,
             "invalid_rows": viol[:limit],
@@ -2627,14 +2863,15 @@ def quote_substring_report(entities, rules, text, limit=50):
 
 
 def quote_substring_gates(raw, final):
-    """task-108：闸分两份输出，别再把「清洗前」当判据。
+    """The gate outputs two copies; no longer use "pre-scrub" as the criterion.
 
-    * gate_raw   —— 跑在模型原始输出上（清洗前，那时还有 quote.归一化 这类字段）：
-                    用来看「模型这次干了什么」，红只当诊断信息。
-    * gate_final —— 跑在最终产物上（清洗后）：**判据是 gate_final.ok == True**。
+    * gate_raw   —— runs on the model's raw output (pre-scrub, when fields like quote.归一化
+                    still exist): shows "what the model did this time", red is diagnostic only.
+    * gate_final —— runs on the final output (post-scrub): **the criterion is
+                    gate_final.ok == True**.
 
-    背景（审查端 P349）：旧版只有一份 gate（等于 gate_raw），于是出现过
-    「看 gate 是红（invalid=8），看产物是绿（0 违规）」——两边不一致会骗人。
+    Background: the old version had only one gate (equal to gate_raw), so "gate is red
+    (invalid=8), output is green (0 violations)" appeared — the two disagreeing is deceptive.
     """
     raw = raw or {}
     final = final or {}
@@ -2651,21 +2888,23 @@ def quote_substring_gates(raw, final):
             "why": "闸跑清洗前、产物看清洗后，两者不一致会骗人（审查端 P349）"}
 
 
-# ---------------------------------------------------------------- task-109：计数器统一 int
+# ---------------------------------------------------------------- counters unified to int
 #
-# 背景（审查端 P350）：`gate_final.dropped_cards` 读出来是 None（**键根本不存在**，缺键读作 None），
-# 而 None 把「数了、是 0」和「没数」混成一件——正是这两天「静默失败」的病根（None 会被人当成
-# 「没问题」）。规则（本文件所有闸一律照办）：
-#   ① 计数器字段类型只能是 int：0 就是「数了、是 0」；
-#   ② 确实没统计的：写 0，**并且**在该闸上加 `unverified: true` + `unverified_fields: [路径]`；
-#   ③ 每个闸都带 `report_line`（`"<闸> k=v ..."`；两份输出的闸用 `" | "` 并列 raw/final），
-#      报表直接贴这一行，不靠「我修了 / 重试了」这种口头保证。
+# Background: gate_final.dropped_cards read out as None (**the key does not exist**; a missing
+# key reads as None), and None conflates "counted, it is 0" with "not counted" — the root of
+# these silent failures (None gets treated as "no problem"). Rules (every gate in this file
+# follows them):
+#   ① counter field type must be int: 0 means "counted, it is 0";
+#   ② genuinely not counted: write 0, **and** add `unverified: true` +
+#      `unverified_fields: [path]` on that gate;
+#   ③ every gate carries `report_line` (`"<gate> k=v ..."`; two-output gates list raw/final
+#      with `" | "`), the report pastes this line, no oral "I fixed / retried" guarantee.
 TEXT_LEAF_FIELDS = {
     "chunk", "identity_table", "table", "rule", "algorithm", "verdict", "levels",
     "hint", "base_source", "base_granularity", "note", "kind", "why", "source",
 }
 
-# 闸名 -> report_line 里要贴的字段（点分路径；别的字段还在 JSON 里，只是不上报表行）
+# gate name -> fields to paste into report_line (dotted paths; other fields stay in JSON, just not on the report line)
 GATE_REPORT_KEYS = {
     "content_gates": ("enum_value_dropped", "name_equals_type_dropped",
                       "cross_same_string", "shape_suspect", "dropped_rows"),
@@ -2709,10 +2948,12 @@ def _leaf_of(info, dotted):
 
 
 def _none_to_zero_inplace(node, path, unverified):
-    """task-109 ①：把闸里的 None 叶子落成确定类型——计数器 0、文本字段 ""，并记进 unverified。
+    """Land the gate's None leaves into definite types — counters 0, text fields "" — and
+    record them in unverified.
 
-    就地改（不重建 dict）：monitor 里的闸与 result 顶层的闸是**同一个对象**，重建会让两边不一致。
-    列表里的 None 不动（那是行明细，不是计数器）。
+    Modified in place (not a rebuilt dict): the gate inside monitor and the gate at result's
+    top level are the **same object**; rebuilding would make the two disagree. None inside
+    lists is untouched (that is row detail, not a counter).
     """
     for k, v in list(node.items()):
         sub = path + "." + k
@@ -2724,7 +2965,7 @@ def _none_to_zero_inplace(node, path, unverified):
 
 
 def gate_report_line(name, info):
-    """task-109 ③：`"<闸> ok=... red=... k=v ..."`——报表直接贴这一行。"""
+    """`"<gate> ok=... red=... k=v ..."` — the report pastes this line directly."""
     parts = []
     for k in ("ok", "red", "verdict"):
         if k in info:
@@ -2740,28 +2981,30 @@ def gate_report_line(name, info):
 
 
 def normalize_gate(name, info):
-    """task-109：一个闸归一 —— 缺的计数器补 0（并标 unverified）、None 落成 0、补 report_line。"""
+    """Normalize one gate — fill missing counters with 0 (marking unverified), land None to 0,
+    add report_line."""
     if not isinstance(info, dict):
         info = {}
     unv = []
     _none_to_zero_inplace(info, name, unv)
     for key in GATE_REPORT_KEYS.get(name, ()):
         if "." in key:
-            continue                      # 嵌套路径由它自己的子闸负责
+            continue                      # nested paths are handled by their own sub-gate
         if key not in info:
             info[key] = 0
-            unv.append(name + "." + key)  # 缺键 = 没数（正是 gate_final.dropped_cards 那个坑）
+            unv.append(name + "." + key)  # missing key = uncounted (exactly the gate_final.dropped_cards hole)
     if info.get("unverified") is True and not unv:
         unv.append(name + ".*")
     info["unverified"] = bool(unv) or info.get("unverified") is True
     info["unverified_fields"] = sorted(set(unv))
-    if name != "quote_substring_gate":   # 这一份自己拼 raw|final 的报表行，见 quote_substring_gates
+    if name != "quote_substring_gate":   # this one composes its own raw|final report line, see quote_substring_gates
         info["report_line"] = gate_report_line(name, info)
     return info
 
 
 def finalize_gates(monitor):
-    """task-109：所有闸统一过一遍 normalize_gate（就地改 monitor，顶层的闸是同一对象，跟着变）。"""
+    """All gates pass through normalize_gate uniformly (monitor modified in place; the gate
+    at the top level is the same object and follows)."""
     done = []
     for name in GATE_REPORT_KEYS:
         if name in ("gate_raw", "gate_final"):
@@ -2802,7 +3045,8 @@ def finalize_gates(monitor):
 
 
 def find_none_counters(doc):
-    """task-109：扫所有闸里仍是 None 的叶子（计数器不许 None）。返回路径清单，空 = 合格。"""
+    """Scan all gates for leaves still None (counters must not be None). Returns the path
+    list; empty = compliant."""
     bad = []
     mon = doc.get("monitor") or {}
     for name in GATE_REPORT_KEYS:
@@ -2822,25 +3066,30 @@ def find_none_counters(doc):
 
 
 def find_gates_missing_report_line(doc):
-    """task-109：每个闸都得有 report_line（报表不许靠口头保证）。"""
+    """Every gate must have report_line (the report must not rely on oral guarantees)."""
     mon = doc.get("monitor") or {}
     return sorted(n for n in GATE_REPORT_KEYS
                   if isinstance(mon.get(n), dict) and not mon[n].get("report_line"))
 
 
 def enforce_quote_substring(entities, rules, text, warnings=None, retried=False):
-    """task-107 二：**运行时子串校验**（不是改 prompt，别指望模型听话，要指望闸）。
+    """**Runtime substring check** (not a prompt change — don't expect the model to obey,
+    expect the gate).
 
-    规则：quote 的每个字符串子字段都必须是 source_chunk 的连续子串（NFKC + 去空白后比对）。
-      * 锚点（quote.原文）不过 => 这张卡溯源地基是假的：**丢这张行** + 记 quote_invalid；
-      * 辅助子字段（quote.归一化）不过 => 丢掉这个子字段（原文锚点还在，行不丢）+ 记 quote_invalid；
-      * retried=True 表示「片级已重试过一轮仍不过」，降级留痕里写明。
-    返回 gate 信息（进了 monitor.quote_substring_gate，红了看得见）。
+    Rule: every string sub-field of quote must be a contiguous substring of source_chunk
+    (compared after NFKC + whitespace strip).
+      * the anchor (quote.原文) fails => this card's provenance base is fake: **drop the row**
+        + record quote_invalid;
+      * an auxiliary sub-field (quote.归一化) fails => drop that sub-field (the source anchor
+        remains, the row is kept) + record quote_invalid;
+      * retried=True means "a piece-level retry already ran once and still failed", stated in
+        the degradation trail.
+    Returns gate info (into monitor.quote_substring_gate; red is visible).
     """
     warnings = warnings if warnings is not None else []
     viol = quote_substring_violations(entities, rules, text)
-    # task-108：gate_raw 的分母要在**清洗前**取（清洗后 quote.归一化 就没了，分母会变小，
-    # 于是 raw/final 两份的分母对不上、看着像数错了）
+    # gate_raw's denominator must be taken **pre-scrub** (post-scrub quote.归一化 is gone, the
+    # denominator shrinks, then raw/final denominators disagree and look miscounted)
     fields_before = _quote_fields_checked(entities, rules)
     drop_by_table = {}
     dropped_rows, dropped_fields = [], []
@@ -2874,29 +3123,30 @@ def enforce_quote_substring(entities, rules, text, warnings=None, retried=False)
                   % (len(viol), sum(1 for v in viol if v["anchor"]),
                      len(dropped_rows), len(dropped_fields), len(dropped_rows),
                      "；片级已重试一轮仍不过" if retried else ""))
-    # task-108：这份是 **gate_raw**（清洗前算的）——只当诊断，判据看 gate_final
+    # this one is **gate_raw** (computed pre-scrub) — diagnostic only, the criterion is gate_final
     return {"kind": "gate_raw",
             "ok": not viol, "red": bool(viol),
             "fields_checked": fields_before,
             "fields_remaining": _quote_fields_checked(entities, rules),
             "invalid": len(viol), "invalid_rows": viol[:50],
             "dropped_rows": len(dropped_rows),
-            # task-107 二（P347 补）：**丢卡也要计数**——否则「22 张」变「20 张」没人知道为什么。
+            # **dropped cards must also be counted** — otherwise "22" becomes "20" with no explanation.
             "dropped_cards": len(dropped_rows), "dropped_fields": len(dropped_fields),
             "retried": bool(retried),
             "rule": "quote 的每个字符串子字段必须是 source_chunk 的连续子串（NFKC+去空白）；"
                     "锚点（原文）不过=丢行，辅助子字段不过=丢字段",
             "algorithm": "运行时校验，不靠 prompt；不过则片级重试一次，仍不过就降级并记 "
                          "quote_invalid；丢卡数进 dropped_cards（不静默减少）",
-            # task-108：本份 = gate_raw（清洗前），判据要看 quote_substring_gate.gate_final
+            # this one = gate_raw (pre-scrub); the criterion is quote_substring_gate.gate_final
             "diagnostic_only": True}
 
 
 def enforce_quote_ratio(entities, schema, warnings=None):
-    """四、quote 占比 gate（task-74 分母 A）：quote_present / (rows − quote_missing) >= 0.95。
+    """quote ratio gate (denominator A): quote_present / (rows − quote_missing) >= 0.95.
 
-    缺引文的行不再当「比例不达标」罚——它们从分母剔除、单列成 quote_missing_rows（引文缺口）；
-    要红的只有未登记的静默缺口（缺 quote 又没记 warning）。
+    Missing-quote rows are no longer penalized as "ratio below standard" — they are removed
+    from the denominator and listed separately as quote_missing_rows (quote gap); only the
+    unregistered silent gap (missing quote with no warning) turns red.
     """
     raw = (schema.get("gates") or {}).get("quote_ratio_min")
     qmin = float(raw) if isinstance(raw, (int, float)) and not isinstance(raw, bool) else 0.95
@@ -2913,24 +3163,30 @@ def enforce_quote_ratio(entities, schema, warnings=None):
     return info
 
 
-# ---------------------------------------------------------------- task-79：时间列「取最新」查值
+# ---------------------------------------------------------------- "take the latest" lookup on the time column
 #
-# 背景（审查端 P238）：时间列排序逻辑**单测可造**，端到端样本**不许造**。
-# 查值口径写死两条，且对同指标多值必须给出不同答案：
-#   * 「现在的 X 是多少」= 按 time_norm 取**最新**那一行（lookup, order=latest）；
-#   * 「最大 X 是多少」= 取**最大值**那一行（max）——最新与最大不是一回事；
-#   * order=oldest 只给反例用：拿旧值当「现在」= 答错（answer_ok 判红，不是口头约定）。
+# Background: time-column sort logic is unit-testable, but end-to-end samples must not be
+# fabricated. The lookup criterion is fixed in two ways, and multi-value same-metric cases
+# must give different answers:
+#   * "what is X now" = take the **latest** row by time_norm (lookup, order=latest);
+#   * "what is the max X" = take the **maximum** row (max) — latest and max are not the same;
+#   * order=oldest is only for negative examples: taking an old value as "now" = wrong
+#     (answer_ok turns red, not an oral convention).
 #
-# 原始 chunk 集里目前没有多值指标（runs/79/scan_metrics79.json 可复算：扫到的 chunk 里
-# 没有「同一指标名 >=2 处带数值」的段落），所以这里只落查值实现与判分；样本由单测构造
-# （runs/79/multivalue_sample.json + runs/79/cards-79.json），端到端不造。
+# The raw chunk set currently has no multi-value metric (recomputable via scan: no chunk has
+# a "same metric name >=2 places with a value" segment), so here only the lookup
+# implementation and scoring live; samples are built by unit tests, end-to-end does not
+# fabricate.
 
 LOOKUP_ORDERS = ("latest", "oldest", "max")
 
-# task-80（P240/P241）：「全库」作用域先定死，实现不许自己理解。
-#   边界 = 「已抽取 chunk 的数值表」= 清单 lookup_scope.json 里列出的每个实体文件的 metrics 表全部行。
-#   清单是唯一来源（不扫目录、不按文件名猜）；新抽取的 chunk 要进库，必须把它的实体文件追加进清单。
-#   当前 lookup 每次查都是一遍全量扫描（O(库行数)），未建索引——不是 O(1)。
+# The "whole library" scope is fixed up front; the implementation must not interpret it on
+# its own.
+#   boundary = "the metrics tables of extracted chunks" = all metrics rows of every entity
+#   file listed in the manifest lookup_scope.json.
+#   The manifest is the sole source (no directory scan, no filename guessing); a newly
+#   extracted chunk must append its entity file to the manifest to enter the library.
+#   Current lookup is a full scan per query (O(library rows)), unindexed — not O(1).
 LOOKUP_SCOPE_FILE = HERE / "lookup_scope.json"
 LOOKUP_SCOPE_ENV = "EXTRACT_LOOKUP_SCOPE"
 LOOKUP_SCOPE_RULE = ("已抽取 chunk 的数值表 = 清单/显式集合里每个实体文件 metrics 表的全部行；"
@@ -2943,9 +3199,11 @@ def lookup_scope_path():
 
 
 def read_lookup_manifest(path=None):
-    """读全库清单 -> [(实体文件路径, 清单声明的 source_chunk_id 或 None)]。
+    """Read the whole-library manifest -> [(entity file path, manifest-declared
+    source_chunk_id or None)].
 
-    清单缺失 = 硬错：全库边界必须显式，不能悄悄退化成单 chunk。
+    Missing manifest = hard error: the library boundary must be explicit, never silently
+    degrade to a single chunk.
     """
     p = pathlib.Path(path or lookup_scope_path())
     if not p.is_file():
@@ -2963,15 +3221,19 @@ def read_lookup_manifest(path=None):
 
 
 def is_manifest_doc(doc):
-    """清单文件的自报标记：source == "manifest"（lookup_scope.json 及它的副本都靠这个认）。"""
+    """The manifest file's self-report marker: source == "manifest" (lookup_scope.json and its
+    copies are recognized by this)."""
     return isinstance(doc, dict) and doc.get("source") == "manifest"
 
 
 def reject_manifest_scope(path=None):
-    """task-81（P243）：scope 只收实体文件列表/内联 dict 列表；传 manifest 直接报错。
+    """scope only accepts an entity-file list / inline dict list; passing a manifest errors
+    directly.
 
-    以前不报错：清单被当实体文件读（里面没有 metrics 表）-> 返回「库里没有该指标名的数值行」，
-    格式错误被伪装成「没找到」（静默空结果）。宁可在入口炸，也不给一个看着正常的空答案。
+    Before, no error: the manifest was read as an entity file (no metrics table) -> returned
+    "no value rows for this metric name", a format error disguised as "not found" (silent
+    empty result). Prefer exploding at the entry over returning an empty answer that looks
+    normal.
     """
     hint = "manifest 请用 scope=None（或传实体文件列表）"
     if path:
@@ -2981,13 +3243,15 @@ def reject_manifest_scope(path=None):
 
 
 def lookup_scope_entries(scope=None):
-    """把 scope 归一成 [{"path","source_chunk_id","entities"}]，返回 (scope_mode, entries)。
+    """Normalize scope into [{"path","source_chunk_id","entities"}], returning (scope_mode,
+    entries).
 
-    scope=None -> 读全库清单（默认全库，scope_mode=manifest）
-    其它       -> 显式集合（scope_mode=explicit）：元素可以是
-                  实体 dict / 路径字符串 / {"path"} / {"entities","source_chunk_id"}。
-                  task-81：manifest（dict 含 files，或路径 JSON 的 source==manifest）不许进来 ——
-                  直接抛 ExtractError，不做「当实体文件读」的静默降级。
+    scope=None -> read the whole-library manifest (default whole library, scope_mode=manifest)
+    otherwise  -> explicit set (scope_mode=explicit): elements may be an entity dict / path
+                  string / {"path"} / {"entities","source_chunk_id"}.
+                  manifest (dict containing files, or path JSON with source==manifest) is not
+                  allowed in — raises ExtractError directly, no silent "read as entity file"
+                  degradation.
     """
     if scope is None:
         entries = []
@@ -3037,7 +3301,8 @@ def lookup_scope_entries(scope=None):
 
 
 def library_metric_rows(scope, name, table="metrics", name_field="指标名", value_field="值"):
-    """全库同名指标候选行：每行带 source_chunk_id + 来自哪个实体文件（清单可见）。"""
+    """Candidate rows of the same metric name across the library: each row carries
+    source_chunk_id + which entity file it came from (visible in the manifest)."""
     _, entries = lookup_scope_entries(scope)
     rows = []
     for e in entries:
@@ -3058,15 +3323,18 @@ def _lookup_candidate(it):
 
 
 def metric_name_key(name):
-    """指标名比对口径：去空白（「P95 延迟」与「P95延迟」算同一个指标）。"""
+    """Metric-name comparison criterion: strip whitespace ("P95 延迟" and "P95延迟" are the
+    same metric)."""
     return re.sub(r"\s+", "", str(name or ""))
 
 
 def parse_time_norm(value):
-    """time_norm -> datetime（带时区）；解不出返回 None（不猜时区）。
+    """time_norm -> datetime (timezone-aware); returns None if unparseable (no timezone
+    guessing).
 
-    task-103 一：day 精度只存 YYYY-MM-DD（原文没有时刻，不能编一个），排序时按当天
-    00:00+08:00 参与——「取最新」只需要可比，不需要假造时刻。
+    day precision stores only YYYY-MM-DD (the source has no clock time, cannot invent one),
+    and sorts as 00:00+08:00 of that day — "take the latest" only needs comparability, not a
+    fabricated clock time.
     """
     if not isinstance(value, str) or not value.strip():
         return None
@@ -3082,7 +3350,8 @@ def parse_time_norm(value):
 
 
 def metric_rows(entities, name, table="metrics", name_field="指标名", value_field="值"):
-    """同一指标名的候选行（值必须是数、不是 bool）；顺序保持原表顺序。"""
+    """Candidate rows of the same metric name (the value must be a number, not bool); order
+    keeps the original table order."""
     want = metric_name_key(name)
     rows = []
     for i, row in enumerate((entities or {}).get(table) or [], 1):
@@ -3097,23 +3366,27 @@ def metric_rows(entities, name, table="metrics", name_field="指标名", value_f
 
 def lookup_metric(name, order="latest", scope=None, table="metrics",
                   name_field="指标名", value_field="值", unit_field="单位"):
-    """全库按「时间列 / 值」取一行作答：latest=最新（现在）、oldest=最旧、max=最大。
+    """Take one row across the library by "time column / value" to answer: latest=most recent
+    (now), oldest=oldest, max=largest.
 
-    task-80（P240/P241）三定义：
-      * 作用域：scope=None 走全库清单（所有已抽取 chunk 的数值表，见 lookup_scope.json）；
-        scope=... 走显式集合（单测/对照用，结果里 scope_mode=explicit 可查）。
-        task-81：scope 传 manifest（dict 含 files / 路径 JSON 的 source==manifest）直接
-        raise ExtractError（「manifest 请用 scope=None（或传实体文件列表）」），不静默返回空。
-      * 同 time_norm 但值不同 = 冲突：不静默选一个，value=None + conflict_candidates
-        （每条候选带各自 source_chunk_id），judge_card 因此判红。
-      * 答案带来源 + 候选清单：source_chunk_id + compared（被比较过的所有行：
-        值 / time_norm / source_chunk_id / 来自哪个实体文件）。
+    Three definitions:
+      * scope: scope=None uses the whole-library manifest (all extracted chunks' metrics
+        tables, see lookup_scope.json); scope=... uses an explicit set (for unit tests /
+        comparison; scope_mode=explicit is inspectable in the result).
+        scope passed a manifest (dict containing files / path JSON with source==manifest)
+        raises ExtractError directly ("manifest 请用 scope=None（或传实体文件列表）"), no
+        silent empty return.
+      * same time_norm but different value = conflict: no silent pick, value=None +
+        conflict_candidates (each candidate carrying its own source_chunk_id), judge_card
+        therefore turns red.
+      * the answer carries source + candidate list: source_chunk_id + compared (all compared
+        rows: value / time_norm / source_chunk_id / which entity file).
     """
     if order not in LOOKUP_ORDERS:
         raise ExtractError("order 只能是 %s，收到 %r" % ("/".join(LOOKUP_ORDERS), order))
     scope_mode, entries = lookup_scope_entries(scope)
     rows = library_metric_rows(scope, name, table, name_field, value_field)
-    # task-107 一（P347 补）：检索也不许「用完就丢」——库里 unresolved 的行要报数。
+    # retrieval also must not "use it and drop it" — report unresolved rows in the library.
     unres = scope_unresolved_rows(scope)
     skipped, timed = 0, []
     for it in rows:
@@ -3165,9 +3438,10 @@ def lookup_metric(name, order="latest", scope=None, table="metrics",
     info.update({"chosen": best["index"], "value": best["value"],
                  "unit": row.get(unit_field),
                  TIME_NORM_FIELD: row.get(TIME_NORM_FIELD),
-                 # task-107 三：查询侧真的读 time_precision / time_uncertain——
-                 # 「精度」是答案的一部分（问「几点」时 day 精度必须答「只知道到日」），
-                 # 不是库里躺着的字段。缺了就是 None（不是默认 day，不猜）。
+                 # the query side really reads time_precision / time_uncertain — 精度 is part
+                 # of the answer (asking "what time" with day precision must answer "only
+                 # known to the day"), not a field lying in the library. Missing = None (not
+                 # default day, no guessing).
                  QUERY_PRECISION_KEY: row.get(TIME_PRECISION_FIELD),
                  "time_uncertain": row.get(TIME_UNCERTAIN_FIELD),
                  "source_chunk_id": best["source_chunk_id"]})
@@ -3175,10 +3449,11 @@ def lookup_metric(name, order="latest", scope=None, table="metrics",
 
 
 def answer_ok(expected, got):
-    """判分：值 + 单位都要对上（值是数就按数比，容差 1e-9）。
+    """Scoring: both value and unit must match (values compare as numbers, tolerance 1e-9).
 
-    task-107 三：expected 里**写了**的答案侧字段（精度 / time_norm / time_uncertain）
-    也必须对上——只有读了这个字段才会不同，写进预期就是在验「查询侧真的读了它」。
+    The answer-side fields **written** in expected (precision / time_norm / time_uncertain)
+    must also match — only reading the field makes them differ; writing them into the
+    expectation is exactly verifying "the query side really read it".
     """
     if not isinstance(expected, dict) or not isinstance(got, dict):
         return False
@@ -3201,10 +3476,12 @@ def answer_ok(expected, got):
 
 
 def judge_card(card, scope=None, order_override=None):
-    """判一张标注卡：按卡上「查法」走全库 lookup，再与「预期答案」比对（值+单位）。
+    """Judge one annotated card: run the whole-library lookup per the card's 查法, then compare
+    against the 预期答案 (value + unit).
 
-    order_override 只给反例样用（例如把「最大」那题按 latest 作答，应当判红）。
-    作答里带来源（source_chunk_id）与候选清单（compared）；冲突时 ok=False、reason 写明。
+    order_override is only for negative examples (e.g. answering the "max" question as
+    latest, which should turn red). The answer carries source (source_chunk_id) and the
+    candidate list (compared); on conflict ok=False with reason stated.
     """
     order = order_override or card.get("查法") or "latest"
     got = lookup_metric(card.get("指标名"), order=order, scope=scope)
@@ -3221,16 +3498,19 @@ def judge_card(card, scope=None, order_override=None):
 
 
 def answer_stats(entities):
-    """task-68 ③ / task-70 ②：跨表 join 只允许 explicit/contain 的行作答。
+    """Cross-table join only allows explicit/contain rows to answer.
 
-    aggregate（派生汇总量）与 mention（名称提及）都不进答案：前者没有单一源事件，
-    后者的锚点是 chunk+quote 而不是事件——拿它们去 join 会造出「看着对上、其实没对上」的答案。
-    假阴 < 假阳：抓不到就不答，不污染答案。靠 normalize 时打的 __fk_method 临时标记统计；
-    调用方统计完必须剥掉标记。
+    aggregate (derived totals) and mention (name mentions) do not enter the answer: the
+    former has no single source event, the latter's anchor is chunk+quote rather than an
+    event — joining with them would produce "looks matched but is not" answers. False
+    negative < false positive: when not found, don't answer, don't pollute the answer.
+    Counted via the __fk_method temporary marker set at normalize; the caller must strip the
+    marker after counting.
 
-    task-71 ②：answer_rows 与 explicit_ratio 并列当判据——覆盖率达标 ≠ 能答题。
-    这里把 answer_rows / answer_ratio / 两个阈值一起报出来，判据在 extract() 里报警
-    （answer_ok：True 达标 / False 报警 / None 无行可判，三表 0 行时不算不达标）。
+    answer_rows is judged alongside explicit_ratio — coverage passing != answerable. Here
+    answer_rows / answer_ratio / both thresholds are reported together; the criterion warns
+    in extract() (answer_ok: True passes / False warns / None no rows to judge, 0 rows across
+    the three tables is not "below standard").
     """
     total, low, low_rows = 0, 0, []
     for table, rows in entities.items():
@@ -3238,7 +3518,7 @@ def answer_stats(entities):
             if not isinstance(row, dict):
                 continue
             method = row.get("__fk_method")
-            if method is None:      # 卡片表没有归属方法（它本身就是事件的根）
+            if method is None:      # the card table has no attribution method (it is the event root itself)
                 continue
             total += 1
             if method not in ANSWER_METHODS:
@@ -3246,7 +3526,7 @@ def answer_stats(entities):
                 low_rows.append("%s[#%d]" % (table, i))
     answer_rows = total - low
     answer_ratio = round(answer_rows / total, 4) if total else None
-    if total == 0:                       # 没有可判的行（不是不达标，是不判）
+    if total == 0:                       # no rows to judge (not "below standard", just not judged)
         answer_ok = None
     else:
         answer_ok = (answer_rows >= FK_ANSWER_ROWS_MIN
@@ -3271,7 +3551,7 @@ def _median(values):
 
 
 def stability_point(result):
-    """task-72 ①：一轮抽取里固定看四个数。"""
+    """Four fixed numbers per extraction run."""
     answer = (result.get("fk") or {}).get("answer") or {}
     return {"rows": (result.get("fk") or {}).get("rows"),
             "explicit": (result.get("fk") or {}).get("explicit"),
@@ -3280,11 +3560,13 @@ def stability_point(result):
 
 
 def stability_report(points):
-    """task-72 ①：重复 N 次的体检报告（中位数 + 区间 + 是否抖）。
+    """Health report after N repeats (median + range + whether it jitters).
 
-    「区间宽于 ±10%」的口径：半宽 = (max−min)/2，相对中位数的半宽 > STABILITY_TOLERANCE
-    （10%）就算 unstable。中位数为 0 时：全 0 视为稳定；出现非 0 视为抖（无法算相对宽）。
-    unstable 的指标 role=health_only（不当判据、只当体检），稳定的才 role=judge。
+    The "range wider than ±10%" criterion: half-width = (max−min)/2, relative half-width >
+    STABILITY_TOLERANCE (10%) counts as unstable. When median is 0: all-zero counts as
+    stable; a nonzero appearing counts as jitter (relative width cannot be computed).
+    Unstable metrics get role=health_only (not a criterion, health only), stable ones get
+    role=judge.
     """
     metrics = {}
     unstable = []
@@ -3323,9 +3605,9 @@ def stability_report(points):
 
 
 def load_e2e_asserts(path=None):
-    """读端到端断言清单（默认 runs/61/e2e_asserts.json）。
+    """Read the end-to-end assertion list (default e2e_asserts.json).
 
-    每条 = 一个「只有查询侧读了这个字段才会答对」的题：
+    Each entry is a question "only the query side reading this field can answer correctly":
       {"id", "题面", "指标名", "查法", "预期": {值, 单位, 精度, ...}, "证明字段"}
     """
     p = pathlib.Path(path) if path else E2E_ASSERTS_PATH
@@ -3339,9 +3621,11 @@ def load_e2e_asserts(path=None):
 
 
 def check_e2e_field_coverage(asserts):
-    """task-107 三（机制）：查询侧字段契约里的每个字段，必须有一条断言把它写进「预期」。
+    """Every field in the query-side field contract must have one assertion writing it into
+    预期.
 
-    没覆盖 = 这个字段「说改了、其实没人在答案里读过」——直接报错，不许静默放过。
+    No coverage = this field was "said to have changed, but nobody actually read it in an
+    answer" — error directly, no silent pass.
     """
     covered = {}
     for a in asserts:
@@ -3361,11 +3645,14 @@ def check_e2e_field_coverage(asserts):
 
 
 def run_e2e_asserts(asserts, scope=None, chunk=None):
-    """跑端到端断言：从提问到答案，证明字段真被读过（单测不算）。
+    """Run end-to-end assertions: from question to answer, prove the field was really read
+    (unit tests don't count).
 
-    判据：lookup_metric 作答后，预期里写了的**每个答案侧字段**都要对上（值/单位/精度/…）。
-    答不对 = 红，不是「没覆盖」。断言可带 "chunk"（只对某个 chunk 生效）——换 chunk 跑时
-    不相关的那几条记 not_applicable（不是跳过、也不是通过）。
+    Criterion: after lookup_metric answers, **every answer-side field written in the
+    expectation** must match (value/unit/precision/…). Wrong answer = red, not "uncovered".
+    An assertion may carry "chunk" (only effective for a certain chunk) — when running on a
+    different chunk, the irrelevant ones are recorded as not_applicable (not skipped, not
+    passed).
     """
     out, red, skipped = [], 0, 0
     cur = (chunk or {}).get("source_chunk_id") if isinstance(chunk, dict) else None
@@ -3412,10 +3699,12 @@ def run_e2e_asserts(asserts, scope=None, chunk=None):
 
 
 def build_answer_index(chunk, result):
-    """task-72 ③：把「每行能不能作答 / 挂在哪个事件」落成一份可复核的索引。
+    """Record "whether each row can answer / which event it attaches to" into a reviewable
+    index.
 
-    成对覆盖要按数据行讲题，所以这里带 quote 原文（detail 里已加），
-    不再靠 where/pos 去猜——pos 相同的行太多了（汇总段整段都挂同一张卡）。
+    Pairwise coverage reasons per data row, so it carries the quote source (already added in
+    detail), no longer guessing by where/pos — too many rows share the same pos (a whole
+    summary segment attaches to the same card).
     """
     cards = []
     for row in result["entities"].get("cards") or []:
@@ -3434,14 +3723,15 @@ def build_answer_index(chunk, result):
 
 
 def pair_check(index, questions):
-    """task-72 ③：逐题验「事件 + 它的那条数据行」是否同时在 answer 里。
+    """Verify per question whether "the event + its data row" are both in answer.
 
-    每题给 event_quote（在卡片 quote / action / target 里找）和
-    row={table, quote}（在数据行 quote 里找），判据：
-      ① 事件抽出来了；② 数据行抽出来了；③ 数据行 method ∈ answer 集合；
-      ④ 数据行的 event_id 就是这道题问的那个事件。
-    ①②失败 = 抽取漏了；③失败 = 行本身不可作答（aggregate/mention）；
-    ④失败 = 关联错了（行挂在别的事件上）——都不是「比例不够」，是成不成对的问题。
+    Each question gives event_quote (searched in card quote / action / target) and
+    row={table, quote} (searched in data-row quote), criteria:
+      ① the event was extracted; ② the data row was extracted; ③ the data row's method ∈ the
+        answer set; ④ the data row's event_id is the event this question asks about.
+    ①② fail = extraction missed it; ③ fail = the row itself is unanswerable
+    (aggregate/mention); ④ fail = wrong link (row attached to another event) — none of these
+    is "ratio too low", it is a pairing problem.
     """
     cards = index.get("cards") or []
     rows = index.get("rows") or []
@@ -3491,7 +3781,7 @@ def pair_check(index, questions):
 
 
 def load_questions(path):
-    """题单：JSON 数组，或 {"questions": [...]}。"""
+    """Question list: a JSON array, or {"questions": [...]}."""
     doc = load_json(path, "questions")
     if isinstance(doc, list):
         return doc
@@ -3501,7 +3791,8 @@ def load_questions(path):
 
 
 def save_failed_piece(chunk, piece_idx, attempts, reason, raw):
-    """⑥ B 档：重试 2 次仍拒 -> 原文+原因落 failed/，并进计数（不许静默丢弃）。"""
+    """Tier B: after 2 retries still rejected -> source+reason into failed/, and counted (no
+    silent drop)."""
     from datetime import datetime, timezone
     try:
         FAILED_DIR.mkdir(parents=True, exist_ok=True)
@@ -3517,28 +3808,31 @@ def save_failed_piece(chunk, piece_idx, attempts, reason, raw):
         return None
 
 
-# ---------------------------------------------------------------- 归一化
+# ---------------------------------------------------------------- normalization
 
 def normalize_row(table, row, chunk, props, warnings, idx, ctx, piece=None):
-    """A 档补全 + 形状复核（类型/枚举/pattern）。哪档怎么处理由 rules 决定，这里只按属性执行。"""
+    """Tier A completion + shape re-check (type/enum/pattern). Which tier does what is
+    decided by rules; here only executes per attribute."""
     rules = ctx["rules"]
     where = "%s[#%d]" % (table, idx)
     ctx["where"] = where
-    ctx["piece"] = piece      # task-69 ②：序号按片解析，归属时要带上片号
-    # task-68 ①：临时字段先 pop（不落产物），只留给 fk 归属当 explicit 线索
+    ctx["piece"] = piece      # sequences resolve per piece; attribution must carry the piece number
+    # temporary fields pop first (not into the output), only left as the explicit hint for fk attribution
     hints = rules.pop_temp_fields(table, row)
     ctx["hint"] = hints.get(rules.hint_field.get(table))
     keep_known_fields(row, props, warnings, where, piece=piece)
     strip_optional_empty(row, table, rules, where, warnings, piece=piece)
-    # task-101 二（P331）：「没有时间信息」=> null（不是 reject）。on_missing=null 的字段
-    # 缺了/空串就显式写 null（键留着，说明「这行没有这个信息」，不是「程序漏了这个字段」）。
+    # "no time info" => null (not reject). A field with on_missing=null that is missing/blank
+    # is explicitly written null (the key stays, saying "this row has no such info", not "the
+    # program forgot this field").
     for name, spec in rules.tables[table].items():
         if spec.get("on_missing") != "null":
             continue
         if _is_blank(row.get(name)):
             row[name] = None
-    # task-101 二：time_raw 是纯剪贴，不许被改写。原文里找不到 => 不认这个写法：
-    # 记 warning + 置 null（下游 time_norm 于是也是 null——宁可没有时间，不要假时间）。
+    # time_raw is pure verbatim, must not be rewritten. Not found in source => do not accept
+    # this form: record warning + null (downstream time_norm then also null — prefer no time
+    # over a fake time).
     for name, spec in rules.tables[table].items():
         if not spec.get("verbatim"):
             continue
@@ -3554,29 +3848,32 @@ def normalize_row(table, row, chunk, props, warnings, idx, ctx, piece=None):
                      " -> 置 null，time_norm 跟着 null（task-101）" % (where, name, val),
                      piece=piece)
             row[name] = None
-    # A 档：fill=derived 的字段由程序产出（覆盖自报值，静默）；推不出且模型也没给 -> 重试该片
+    # tier A: fill=derived fields are produced by the program (overwriting any model-reported
+    # value, silently); underivable and the model also gave nothing -> retry the piece
     for algo in DERIVE_ORDER:
         for name, spec in rules.tables[table].items():
             if spec.get("derive") != algo or spec["on_missing"] not in ("fill", "null"):
                 continue
             val = DERIVERS[algo](row, spec, chunk, ctx)
             if _is_blank(val):
-                # task-101 一（P331）：推不出 => null，**不许回落到模型自报值**（那是静默造假：
-                # 模型给「去年」配 2022-01-01 也照收）。null 键保留，审计/check_6 只看非空值。
+                # underivable => null, **never fall back to the model-reported value** (that is
+                # silent fabrication: the model pairing "去年" with 2022-01-01 would also be
+                # accepted). The null key stays; audit/check_6 only looks at non-null values.
                 if spec["on_missing"] == "null":
                     row[name] = None
                     continue
-                # task-70 ②（R12）：nullable 字段推不出就不写（identities.event_id 缺省 = 按
-                # mention 处理，靠 source_chunk_id + 抽取位置 + quote 定位），不硬造外键、不拒片
+                # a nullable field underivable is left unwritten (identities.event_id default =
+                # treated as mention, located by source_chunk_id + extraction position + quote),
+                # no fabricated key, no piece reject
                 if spec.get("nullable"):
                     row.pop(name, None)
                     continue
                 if _is_blank(row.get(name)):
                     raise PieceRejected("%s: %r 缺失且程序推不出（derive=%s，A 档失败）"
                                         % (where, name, algo))
-                continue  # 程序推不出但模型给了：保留，交给形状复核
+                continue  # program underivable but the model gave one: keep it, hand to shape re-check
             row[name] = val
-    # 形状复核：类型 / 枚举 / pattern（schema 说什么就是什么）
+    # shape re-check: type / enum / pattern (whatever schema says)
     for name, spec in rules.tables[table].items():
         val = row.get(name)
         if _is_blank(val):
@@ -3597,8 +3894,9 @@ def normalize_row(table, row, chunk, props, warnings, idx, ctx, piece=None):
                                 % (where, name, val, spec["enum"]))
         if spec.get("pattern") and isinstance(val, str) and re.match(spec["pattern"], val) is None:
             raise PieceRejected("%s: %r=%r 不符 %s（B 档）" % (where, name, val, spec["pattern"]))
-    # task-101 三（P331）：模型判 other、但动作词在别名表里能归到具体枚举 -> 程序改判
-    # （中英都走同一张表；表里没有的词才留在 other，改了记 warning 可查）
+    # the model judged other, but the action word maps to a concrete enum in the alias table ->
+    # the program re-judges (both languages use the same table; only words absent from the table
+    # stay other; the re-judgment records a warning, inspectable)
     for name, spec in rules.tables[table].items():
         if not spec.get("alias"):
             continue
@@ -3621,10 +3919,11 @@ def normalize_row(table, row, chunk, props, warnings, idx, ctx, piece=None):
     return row
 
 
-# ---------------------------------------------------------------- 分片合并
+# ---------------------------------------------------------------- piece merge
 
 def unique_key_of(ent):
-    """唯一键只能来自 schema（R4：唯一键属于契约，不在代码里另写一份）。"""
+    """The unique key may only come from schema (R4: the unique key belongs to the contract,
+    no second copy written in code)."""
     uk = ent.get("unique_key") if isinstance(ent, dict) else None
     if not (isinstance(uk, list) and uk):
         raise ExtractError("schema 错：%r 没有 unique_key（R4）"
@@ -3633,7 +3932,8 @@ def unique_key_of(ent):
 
 
 def merge_rows(all_rows, unique_key, warnings, table):
-    """拆片后按 schema 唯一键合并去重（同一行被两片抽到只留第一份）。"""
+    """Merge and dedupe after splitting by the schema unique key (the same row extracted by two
+    pieces keeps only the first copy)."""
     seen = set()
     out = []
     for piece_idx, rows in enumerate(all_rows):
@@ -3649,27 +3949,34 @@ def merge_rows(all_rows, unique_key, warnings, table):
     return out
 
 
-# ---------------------------------------------------------------- task-66 内容噪声闸（P209）
+# ---------------------------------------------------------------- content-noise gates
 #
-# 真调用验证发现两类内容噪声，审查端 P209 定「可精确判定的用闸，剩下的抽检」：
-#   ① 类型词（仓库/版本/工具）被 LLM 当标识名 -> 能机器判定 -> 硬闸：报红 + 丢行 + 计数；
-#   ② 函数名/配置项（strip_fences）同一片段既当动作又当标识 -> 硬闸：报红（路由错位要人看）；
-#   ③ 密度偏高（1200 字符抽 19 个标识 = 明显过抽）-> 只体检：每 chunk 各表行数 + 标识数/千字符，
-#      --density-scan 把前 5% 的 chunk 列出来给人看（阈值是拍的，不当闸）；
-#   ④ 剩下的靠抽检（spotcheck.py：每表随机 5 行 + 种子留底，标识表错行率 <10% 才继续端到端）。
+# Real-call verification found two kinds of content noise; the decision was "precisely
+# decidable => gate, the rest => spot check":
+#   ① a type word (仓库/版本/工具) used by the LLM as an identifier name -> machine-decidable
+#     -> hard gate: red + drop the row + count;
+#   ② a function name / config item (strip_fences) used as both action and identity in the
+#     same fragment -> hard gate: red (routing mismatch, for human review);
+#   ③ density too high (19 identities from 1200 chars = obvious over-extraction) -> inspection
+#     only: per-chunk table row counts + identities per thousand chars, --density-scan lists
+#     the top 5% chunks for review (the threshold is hand-picked, not a gate);
+#   ④ the rest rely on spot check (spotcheck.py: 5 random rows per table + seed kept,
+#     identity-table error rate <10% before continuing end-to-end).
 #
-# 两道闸的「红」不是 PieceRejected（不重试、不丢整片）：它们跑在归一化之后，
-# 只对已通过结构校验的行做内容判定，命中行记 warning（code 见下）+ 进 monitor.content_gates。
+# The two gates' "red" is not PieceRejected (no retry, no whole-piece drop): they run after
+# normalization, only content-judge rows that already passed structural validation; hits
+# record a warning (codes below) + enter monitor.content_gates.
 
-CONTENT_GATE_ENUM = "enum_value_as_identity"     # ① 枚举值当标识名（丢行）
-CONTENT_GATE_CROSS = "identity_card_same_string"  # ② 同一串既当标识又当卡片动作（不丢行）
-CONTENT_GATE_EQUALS = "name_equals_type"          # ① 的名称==类型（丢行）
-CONTENT_GATE_SHAPE = "identifier_as_action"       # task-67 ② 纯标识符形态当动作（不丢行）
-CONTENT_GATE_GENERIC = "identity_generic"         # task-70 ④ 通称不具名 .bak / 纯后缀词（不丢行）
+CONTENT_GATE_ENUM = "enum_value_as_identity"     # ① an enum value used as an identifier name (drop row)
+CONTENT_GATE_CROSS = "identity_card_same_string"  # ② the same string used as both identity and card action (keep row)
+CONTENT_GATE_EQUALS = "name_equals_type"          # ① name==type (drop row)
+CONTENT_GATE_SHAPE = "identifier_as_action"       # pure identifier shape used as an action (keep row)
+CONTENT_GATE_GENERIC = "identity_generic"         # generic term not naming anything: .bak / pure suffix word (keep row)
 
-# task-67 ②：纯标识符形态（下划线/点分选择器，可带空括号）——正常动作是中文动宾
-# task-104 二（P343）：补路径分隔符 `/` `\`——旧正则不认 `runs/61/extract.py`，把文件路径
-# 判成「非标识符」；路径本来就是标识符最常见的形态之一，漏这一类等于形态闸只挡了一半。
+# pure identifier shape (underscore/dotted selector, optional empty parens) — a normal action
+# is a Chinese verb-object. Path separators `/` `\` added — the old regex did not recognize
+# `src/tools/extract.py` and judged the file path "not an identifier"; a path is one of the most
+# common identifier shapes, missing it means the shape gate only blocks half.
 SHAPE_IDENT_RE = re.compile(r"^[a-z][a-z0-9_\-]*([./\\][a-z0-9_\-]+)*(\(\))?$")
 CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 
@@ -3677,7 +3984,8 @@ IDENTITY_ENUM_FIELD = "类型"
 
 
 def identity_table_of(rules):
-    """标识表 = schema 里同时有「名称」和 enum 型「类型」的实体（不写死表名）。"""
+    """The identity table = the entity in schema that has both 名称 and an enum-typed 类型
+    (no hard-coded table name)."""
     for fk in rules.order:
         props = rules.props.get(fk) or {}
         if "名称" in props and isinstance((props.get(IDENTITY_ENUM_FIELD) or {}).get("enum"), list):
@@ -3686,7 +3994,8 @@ def identity_table_of(rules):
 
 
 def shape_looks_like_identifier(value):
-    """task-67 ②：纯标识符形态且不含中文 -> 疑似把标识当动作（形态规则，不是黑名单）。"""
+    """Pure identifier shape and no CJK -> suspected "identifier mistaken for an action" (a
+    shape rule, not a blacklist)."""
     if not isinstance(value, str):
         return False
     s = value.strip()
@@ -3696,25 +4005,29 @@ def shape_looks_like_identifier(value):
 
 
 def _path_like(value):
-    """task-104 二：像文件路径（含路径分隔符）。target=路径是正常语义，不是「把标识当动作」。"""
+    """Looks like a file path (contains a path separator). target=path is normal semantics,
+    not "identifier mistaken for an action"."""
     return isinstance(value, str) and ("/" in value or "\\" in value)
 
 
 def apply_content_gates(entities, rules, warnings):
-    """task-66 ①② 枚举值当标识名 / 同串交叉 + task-67 ② 形态闸。
+    """① ② enum value as identifier name / same-string cross + shape gate.
 
-    ①：名称 / 完整原文写法 ∈ 类型枚举值，或 名称==类型 -> 报红 + 丢弃该行 + 计数；
-    ②：名称 / 完整原文写法 与 卡片 action/target 完全相同 -> 报红（路由错位，不丢行）；
-      task-67 ②：action/target 本身是纯标识符形态且不含中文 -> 记 warning（不丢行）。
-    返回报告，落 monitor.content_gates 与 build_log（丢了哪些行、命中几处都要能查）。
+    ①: 名称 / 完整原文写法 ∈ the type enum values, or 名称==类型 -> red + drop the row + count;
+    ②: 名称 / 完整原文写法 exactly equals a card action/target -> red (routing mismatch, keep
+       row); shape gate: action/target itself is pure identifier shape without CJK -> warning
+       (keep row).
+    Returns the report, recorded in monitor.content_gates and build_log (which rows were
+    dropped, how many hits — all inspectable).
     """
     ident = identity_table_of(rules)
     report = {"identity_table": ident, "enum_values": [],
               "enum_value_dropped": 0, "name_equals_type_dropped": 0,
               "cross_same_string": 0, "shape_suspect": 0,
               "dropped_rows": 0, "red": False, "examples": []}
-    # task-67 ② 形态闸：action/target 是纯标识符形态（strip_fences / gates.quote_ratio_min）-> warning
-    # 不依赖标识表，所以放在 ident is None 早退之前（只报警、不丢行、不置 red）
+    # shape gate: action/target is pure identifier shape (strip_fences / gates.quote_ratio_min)
+    # -> warning. It does not depend on the identity table, so it sits before the ident-is-None
+    # early return (warn only, keep row, no red)
     shape = 0
     for idx, row in enumerate(entities.get(rules.cards_key) or [], 1):
         if not isinstance(row, dict):
@@ -3724,9 +4037,10 @@ def apply_content_gates(entities, rules, warnings):
             v = row.get(field)
             if not shape_looks_like_identifier(v):
                 continue
-            # task-104 二（P343）：形态闸补了路径分隔符后，`runs/61/extract.py` 这类**目标**会被
-            # 判成标识符形态——但 target 是文件路径属于正常语义（「把标识当动作」说的是 action）。
-            # 所以路径形态的 target 不告警；action 与点分标识（gates.quote_ratio_min）照旧告警。
+            # with path separators added to the shape gate, a **target** like `src/tools/extract.py`
+            # is judged identifier-shaped — but target as a file path is normal semantics ("identifier
+            # mistaken for action" is about action). So a path-shaped target does not warn; action
+            # and dotted identifiers (gates.quote_ratio_min) still warn.
             if field == "target" and _path_like(v):
                 continue
             shape += 1
@@ -3776,7 +4090,7 @@ def apply_content_gates(entities, rules, warnings):
                  "%s: %s=%s -> 报红并丢弃该行（task-66 ①：枚举值当标识名，丢弃 %d 行）"
                  % (where, field, why, report["dropped_rows"]))
     entities[ident] = kept
-    # ② 同串交叉：同一 chunk 内 标识名 == 卡片 action/target（完全相同）=> 路由错位
+    # ② same-string cross: within one chunk an identifier name == card action/target (exactly equal) => routing mismatch
     card_texts = set()
     for row in entities.get(rules.cards_key) or []:
         if not isinstance(row, dict):
@@ -3805,15 +4119,18 @@ def apply_content_gates(entities, rules, warnings):
     return report
 
 
-# task-70 ④（P217）：通称不具名的形态闸——标识的「完整原文写法」只写扩展名 / 纯后缀词时报警。
-#   .bak / .json（以 . 开头的纯扩展名）或 bak / 备份（纯后缀词）= 没写名字，只留了通称。
-#   函数名（strip_fences）、工具名（Python）该落「工具」，不在这条闸的范围里（task-67 形态闸管卡片侧）。
+# generic-term-not-naming shape gate — warn when an identity's 完整原文写法 is only an
+# extension / a pure suffix word. .bak / .json (pure extension starting with .) or bak / 备份
+# (pure suffix word) = no name written, only a generic term left. Function names
+# (strip_fences), tool names (Python) belong to 工具, outside this gate's range (the shape
+# gate handles the card side).
 GENERIC_SUFFIX_WORDS = {"bak", "backup", "tmp", "temp", "log", "json", "md", "py", "txt",
                         "zip", "old", "orig", "copy", "副本", "备份", "临时", "日志", "快照"}
 
 
 def identity_generic_reason(raw):
-    """返回「疑似通称不具名」的原因；不像通称就返回 None。"""
+    """Return the "likely generic term, not naming anything" reason; None if it does not look
+    generic."""
     if not isinstance(raw, str):
         return None
     s = raw.strip()
@@ -3827,10 +4144,12 @@ def identity_generic_reason(raw):
 
 
 def apply_identity_generic_gate(entities, rules, warnings):
-    """task-70 ④：标识的 完整原文写法 是通称（.bak / 纯后缀词）-> warning（不丢行）。
+    """An identity's 完整原文写法 is a generic term (.bak / pure suffix word) -> warning
+    (keep row).
 
-    这类行「名字」是空的，canonical_id 会把所有 .bak 归成一个，join 时必然串味；
-    但也可能真的是在说「备份」这个动作对象，所以只报警、交抽检/人看，不擅自丢。
+    Such a row's "name" is empty; canonical_id would group every .bak into one, inevitably
+    cross-joining. But it might genuinely mean the action object "backup", so it only warns,
+    hands off to spot check / human review, never drops on its own.
     """
     ident = identity_table_of(rules)
     report = {"identity_table": ident, "suspected": 0, "examples": [], "red": False}
@@ -3856,11 +4175,14 @@ def apply_identity_generic_gate(entities, rules, warnings):
 
 
 def enforce_fk_invariants(entities, rules):
-    """task-70 ②（R12）：外键不变量——程序算得出就写，算不出就不写，不许「半写」。
+    """Foreign-key invariant (R12) — write when the program can compute it, not write when it
+    cannot, no "half-write".
 
-    * event_id 非可选的表（metrics/facts）：每行必须有 event_id，且必须存在于 cards；
-    * event_id 可选的表（identities）：可以没有（mention 用 chunk+偏移+quote 定位）；
-      有就必须存在于 cards（不许硬造悬空外键、不许写占位串）。
+    * tables whose event_id is non-optional (metrics/facts): every row must have event_id,
+      and it must exist among cards;
+    * tables whose event_id is optional (identities): may omit it (mention locates by
+      chunk+offset+quote); when present it must exist among cards (no fabricated dangling key,
+      no placeholder string).
     """
     cards_key = rules.cards_key
     card_ids = {r.get("event_id") for r in (entities.get(cards_key) or [])
@@ -3892,11 +4214,13 @@ def enforce_fk_invariants(entities, rules):
 
 
 def density_of(counts, text_len, identity_table=None, chunk=None, pieces=None):
-    """③ 密度体检项：每 chunk 各表行数 + 标识数/千字符（不当闸，只给人看）。
+    """Density inspection item: per-chunk table row counts + identities per thousand chars
+    (not a gate, for human review).
 
-    task-76 ②：再加成本侧 `calls_per_1k_chars = pieces / chars × 1000`，与产出侧
-    （rows_per_1k_chars / identities_per_1k_chars）**成对**出现——只看密度不看调用次数，
-    拆片后「密度更高」会被误当成「抽得更全」。pieces 给不出就写 null，不猜。
+    Add the cost side `calls_per_1k_chars = pieces / chars × 1000`, paired with the output
+    side (rows_per_1k_chars / identities_per_1k_chars) — looking only at density without call
+    count would misread post-split "higher density" as "extracted more fully". pieces
+    unavailable writes null, no guessing.
     """
     counts = {k: int(v) for k, v in (counts or {}).items() if isinstance(v, int)}
     chars = max(int(text_len or 0), 1)
@@ -3918,9 +4242,11 @@ def density_stats(entities, text_len, identity_table=None, pieces=None):
 
 
 def density_outliers(stats_list, top_frac=0.05, min_samples=20):
-    """分布异常：按「标识数/千字符」降序取前 top_frac 的 chunk 列出来（只体检，不当闸）。
+    """Distribution outliers: list the top top_frac chunks by descending "identities per
+    thousand chars" (inspection only, not a gate).
 
-    样本 < min_samples 时仍给出排名，但 enough_samples=False（小样本的 5% 没统计意义）。
+    With samples < min_samples it still ranks, but enough_samples=False (a small sample's 5%
+    has no statistical meaning).
     """
     rows = [s for s in (stats_list or [])
             if isinstance(s, dict) and isinstance(s.get("identities_per_1k_chars"), (int, float))]
@@ -3937,7 +4263,8 @@ def density_outliers(stats_list, top_frac=0.05, min_samples=20):
 
 
 def density_scan(path, top_frac=0.05, rules=None):
-    """--density-scan：读 JSONL（build_log 条目 {chunk, chars, counts}），列前 5% 密度异常 chunk。"""
+    """--density-scan: read JSONL (build_log entries {chunk, chars, counts}), list the top 5%
+    density-outlier chunks."""
     identity_table = identity_table_of(rules) if rules is not None else "identities"
     p = pathlib.Path(path)
     if not p.is_file():
@@ -3959,30 +4286,32 @@ def density_scan(path, top_frac=0.05, rules=None):
     report = density_outliers(stats, top_frac)
     report["scanned"] = len(stats)
     report["skipped_missing_chars"] = skipped
-    report["note"] = "只体检：密度高不代表错，列出来给人复核过抽；阈值/前 5% 是拍的，不当闸"
+    report["note"] = "inspection only: high density is not necessarily wrong, listed for human review; the threshold / top 5% is hand-picked, not a gate"
     return report
 
 
-# ---------------------------------------------------------------- task-77 ②：覆盖式断言
+# ---------------------------------------------------------------- coverage-style assertion
 #
-# P227 的核：real1200 的「期望值」是照运行结果抄的 —— 运行抽了 5 条 identities，期望就写 5 条，
-# 于是漏抽的 15 条被当成了「本来就该 5 条」。判据换成覆盖式，两条各自独立：
-#   * 清单内漏抽 = 红（覆盖不全就是错，不是「少抽一点也没关系」）
-#   * 清单外多抽 = warning（抽多了/抽错了要可见，但不整份作废）
-# 清单（expected.json）由人工读 chunk 原文数出来，跟本文件的产物无关，见 fixtures/real1200/expected.json。
+# The core problem: real1200's "expected values" were copied from run results — the run
+# extracted 5 identities, so the expectation wrote 5, treating the 15 missed ones as "it
+# should have been 5". The criterion was changed to coverage-style, two independent items:
+#   * missed within the list = red (incomplete coverage is an error, not "missing a little is fine")
+#   * extra beyond the list = warning (over/mis-extraction must be visible, but not a whole-run failure)
+# The list (expected.json) is counted by a human reading the chunk source, independent of this
+# file's output; see fixtures/real1200/expected.json.
 
 EXPECTED_TABLES = ("metrics", "identities", "facts")
 
 
 def metric_key(row):
-    # 拼成一个字符串：报「漏了哪条」时能直接念（元组/列表在留痕里不好读）
+    # join into one string: "which one is missing" can be read out directly (tuples/lists are hard to read in the trail)
     return "%s=%s %s" % (norm_ws(str(row.get("指标名") or "")),
                          norm_ws(str(row.get("值"))),
                          norm_ws(str(row.get("单位") or "")))
 
 
 def identity_key(row):
-    # 产物行用「完整原文写法」；人工清单里叫「写法」（同一个东西的两种叫法）
+    # output rows use 完整原文写法; the human list calls it 写法 (two names for the same thing)
     return norm_ws(str(row.get("完整原文写法") or row.get("写法")
                        or row.get("名称") or ""))
 
@@ -3999,7 +4328,8 @@ def load_expected(path):
 
 
 def expected_keys(expected):
-    """把人工清单归一成每表的 key 列表（保持清单顺序，报「漏了哪几条」时照原文说）。"""
+    """Normalize the human list into per-table key lists (keep list order; "which ones are
+    missing" is stated in the original terms)."""
     keys = {"metrics": [], "identities": [], "facts": []}
     for m in expected.get("expected_metrics") or []:
         keys["metrics"].append(metric_key(m))
@@ -4011,7 +4341,8 @@ def expected_keys(expected):
 
 
 def expected_coverage(entities, expected):
-    """清单内必须覆盖（漏=红）；清单外一律 warning（多抽/抽错要可见）。"""
+    """Within the list must be covered (missed = red); beyond the list is always warning
+    (over/mis-extraction must be visible)."""
     want = expected_keys(expected)
     keyfns = {"metrics": metric_key, "identities": identity_key, "facts": fact_key}
     tables = {}
@@ -4024,7 +4355,7 @@ def expected_coverage(entities, expected):
         wanted = want[table]
         wanted_set = set(wanted)
         missing = [k for k in wanted if k not in got_set]
-        # 清单外的行（去重后报，同一写法多行只报一次）
+        # rows beyond the list (reported deduped; the same writing in multiple rows reports once)
         extra = []
         seen = set()
         for k in got:
@@ -4043,15 +4374,16 @@ def expected_coverage(entities, expected):
             "note": "清单内漏抽=红；清单外=warning（可见但不作废）"}
 
 
-# ---------------------------------------------------------------- 主流程
+# ---------------------------------------------------------------- main flow
 
 def load_chunk(path):
     chunk = load_json(path, "chunk")
     for key in ("source_chunk_id", "text"):
         if not chunk.get(key):
             raise ExtractError("chunk 缺字段 %r" % key)
-    # task-102 三：time_ref 不再是硬要求——三级基准（turn/session/chunk）都拿不到时，
-    # 相对时间一律 null + time_uncertain=true（绝不用 now()）。给了就必须是 ISO8601。
+    # time_ref is no longer a hard requirement — when none of the three bases
+    # (turn/session/chunk) is available, relative time is all null + time_uncertain=true
+    # (never now()). When given, it must be ISO8601.
     for key in (BASE_FALLBACK_FIELD,) + BASE_LEVELS:
         val = _base_value(chunk, key)
         if val and not ISO_PATTERN.match(val):
@@ -4063,12 +4395,14 @@ def load_chunk(path):
 
 
 def load_replay(path):
-    """--replay 归一成 {"default": str|None, "pieces": [str]|None, "attempts": {片号: [str]}}。"""
+    """--replay normalized into {"default": str|None, "pieces": [str]|None, "attempts":
+    {piece no.: [str]}}."""
     return normalize_replay(load_json(path, "replay"))
 
 
 def normalize_replay(doc):
-    """把一份 replay 文档（字符串 / 对象）归一成同一形状（--repeat 的每轮文档也走这里）。"""
+    """Normalize one replay document (string / object) into the same shape (each --repeat
+    round's document also goes through here)."""
     out = {"default": None, "pieces": None, "attempts": {}}
     if isinstance(doc, str):
         out["default"] = doc
@@ -4102,10 +4436,12 @@ def normalize_replay(doc):
 
 
 def load_replays(path, repeats):
-    """task-72 ①：--repeat 每轮用一份响应，模拟「同一 chunk 跑 N 次」的真实抖动。
+    """--repeat uses one response per round, simulating the real jitter of "the same chunk
+    run N times".
 
-    接受 list（每轮一项）或 {"repeats": [...]}；普通单文档照样兼容（每轮用同一份）。
-    轮数多于给定份数时沿用最后一份（不伪造内容，只是复用）。
+    Accepts a list (one item per round) or {"repeats": [...]}; a plain single document is
+    still compatible (each round uses the same one). When rounds exceed the given count, the
+    last one is reused (not fabricated content, just reused).
     """
     doc = load_json(path, "replay")
     seq = None
@@ -4124,17 +4460,17 @@ def load_replays(path, repeats):
 
 
 def pick_replay(replay, piece_no, attempt):
-    """取第 piece_no 片（1 起）第 attempt 次（1 起）的响应文本。"""
+    """Take the response text of piece_no (from 1), attempt (from 1)."""
     seq = replay.get("attempts", {}).get(piece_no)
     if seq:
         if attempt <= len(seq):
             return seq[attempt - 1]
-        return seq[-1]  # 重试次数多于给定序列：重复最后一次（模拟模型卡住，不伪造成功）
+        return seq[-1]  # more retries than the given sequence: repeat the last (simulate a stuck model, not fake success)
     pieces = replay.get("pieces")
     if pieces is not None:
         if piece_no - 1 < len(pieces):
             return pieces[piece_no - 1]
-        return "{}"  # 片数多于给定响应：该片按空结果处理，不伪造内容
+        return "{}"  # more pieces than given responses: this piece is empty, not fabricated
     if replay.get("default") is not None:
         return replay["default"]
     return "{}"
@@ -4149,16 +4485,17 @@ def extract(chunk, schema, replay_text=None, prompt=None, rules=None, rules_path
     warnings = []
     prompts = []
     metas = []
-    accepted = []   # [{"piece": 片号, "scope": (a,b), "raw": 解析后的 doc}]
+    accepted = []   # [{"piece": piece no., "scope": (a,b), "raw": parsed doc}]
     failed = []     # [{"piece","attempts","reason","path"}]
-    unlocated = []  # task-73 ①：既无偏移又无文字锚点的行（不落产物，但不静默丢）
+    unlocated = []  # rows with neither offset nor text anchor (not into output, but not silently dropped)
     dropped = 0
     retries = 0
-    quote_retried_pieces = []   # task-107 二：片级重试过仍不过的片（降级留痕要写明）
+    quote_retried_pieces = []   # pieces that still failed after a piece-level retry (stated in the degradation trail)
     max_try = max_retries() + 1
     source = "replay" if replay_text is not None else "api"
 
-    # 第 0 遍：逐片取模型输出 + B 档校验；被拒就重试该片（上限 2 次），仍拒 -> failed/ + 计数
+    # pass 0: take model output piece by piece + tier B validation; rejected => retry that piece
+    # (up to 2 times), still rejected -> failed/ + count
     for i, (a, b) in enumerate(pieces, 1):
         view = {"source_chunk_id": chunk["source_chunk_id"],
                 "time_ref": chunk.get("time_ref"), "text": text[a:b]}
@@ -4187,8 +4524,9 @@ def extract(chunk, schema, replay_text=None, prompt=None, rules=None, rules_path
                 wtmp = []
                 dropped += validate_piece(doc, chunk, (a, b), rules, wtmp, piece=i,
                                           unlocated=unlocated)
-                # task-107 二：片级先做一次 quote 子串校验——不过就**触发重试一次**
-                # （走下面同一个 PieceRejected 通道），重试仍不过才降级丢行（见 enforce_quote_substring）。
+                # do one quote substring check per piece first — a fail **triggers one retry**
+                # (through the same PieceRejected path below); still failing after the retry
+                # degrades and drops rows (see enforce_quote_substring).
                 qviol = quote_substring_violations(doc, rules, text)
                 if qviol and attempt < max_try:
                     raise PieceRejected(
@@ -4217,7 +4555,7 @@ def extract(chunk, schema, replay_text=None, prompt=None, rules=None, rules_path
         raise ExtractError("所有片都被拒（%s），无可用结果（原文已落 failed/，不是静默丢弃）"
                            % (reasons or "未知"))
 
-    # 第一遍：卡片表（event_id 由偏移复算，不依赖三表）
+    # pass 1: card table (event_id recomputed by offset, independent of the three tables)
     cards_key = rules.cards_key
     if not cards_key:
         raise ExtractError("schema 错：没有 file_key=cards 的实体（卡片表是外键归属的根）")
@@ -4229,8 +4567,10 @@ def extract(chunk, schema, replay_text=None, prompt=None, rules=None, rules_path
     ctx = {"rules": rules, "table": cards_key, "scope": None, "fk": None, "where": None,
            "piece": None, "hint": None, "trace_hits": []}
     cards_by_piece = []
-    # task-69 ③：序号是派生值——程序按 抽取位置 升序排 cards 后编号 1..n（LLM 不写序号）。
-    # 序号按「片」作用域：同一次模型输出里的一批卡编一套号，跨片各自从 1 开始。
+    # the sequence is a derived value — the program sorts cards by extraction position
+    # ascending then numbers them 1..n (the LLM does not write the number). Sequences are
+    # per-piece scoped: one batch of cards in one model output gets one numbering, each piece
+    # starts from 1.
     seq_maps = {}
     reorder_pieces = []
     card_pos_field = rules.pos_field.get(cards_key)
@@ -4248,7 +4588,8 @@ def extract(chunk, schema, replay_text=None, prompt=None, rules=None, rules_path
             rows.append(normalize_row(cards_key, dict(row), norm_chunk,
                                       rules.props[cards_key], warnings, j, ctx,
                                       piece=item["piece"]))
-        # task-69 ③：按 抽取位置 升序排（无偏移的排最后），并记 LLM 原始顺序是否已是升序
+        # sort by extraction position ascending (no-offset rows last), and record whether the
+        # LLM's original order was already ascending
         before = [r.get(card_pos_field) for r in rows]
         rows.sort(key=lambda r: (not isinstance(r.get(card_pos_field), int),
                                  r.get(card_pos_field) if isinstance(r.get(card_pos_field), int) else 0))
@@ -4266,8 +4607,9 @@ def extract(chunk, schema, replay_text=None, prompt=None, rules=None, rules_path
                   % ",".join(str(p) for p in reorder_pieces))
 
     has_rest = any(bool(item["raw"].get(k)) for item in accepted for k in rest_keys)
-    # R14 facts 独立化：cards 空时，nullable 表（facts/identities）行可独立落盘（event_id=null），
-    # 只有非 nullable 表（metrics）的行仍必须挂在事件下。
+    # R14 facts independence: with cards empty, nullable tables (facts/identities) rows can be
+    # written independently (event_id=null); only non-nullable tables (metrics) must still
+    # attach to an event.
     has_non_nullable_rest = any(
         bool(item["raw"].get(k)) for item in accepted
         for k in rest_keys if k not in rules.mention_tables)
@@ -4287,7 +4629,8 @@ def extract(chunk, schema, replay_text=None, prompt=None, rules=None, rules_path
                     len(text), card_pos, seq_maps=seq_maps, reorder=bool(reorder_pieces),
                     tables=rest_keys, mention_tables=rules.mention_tables)
 
-    # 第二遍：其余表（外键由程序按偏移归属；档位行为同样来自 rules）
+    # pass 2: the remaining tables (foreign key attributed by the program by offset; tier
+    # behavior likewise from rules)
     rows_by_piece = {fk_: [] for fk_ in rest_keys}
     for item in accepted:
         norm_chunk["_scope"] = item["scope"]
@@ -4311,7 +4654,8 @@ def extract(chunk, schema, replay_text=None, prompt=None, rules=None, rules_path
                   "metrics 为空：本 chunk 没有可落数值表的值（契约不强制非空，但请确认）")
 
     fk_sum = fk.summary()
-    # task-69 ④：序号越界单独报红（不是静默回落）；「给错」和「没给」必须分开数
+    # out-of-range sequences report red separately (not a silent fallback); "wrong" and
+    # "missing" must be counted separately
     if fk_sum["hint_invalid"]:
         bad = fk_sum["hint_invalid_rows"]
         shown = "；".join("%s 给的序号=%r" % (r.get("where"), r.get("hint")) for r in bad[:10])
@@ -4323,13 +4667,13 @@ def extract(chunk, schema, replay_text=None, prompt=None, rules=None, rules_path
                   "回来查 chunks/卡片切分，不是加 prompt。越界明细：%s%s"
                   % (fk_sum["hint_invalid"], fk_sum["rows"], fk_sum["hint_ok"],
                      fk_sum["hint_invalid"], fk_sum["hint_missing"], shown, more))
-    # task-70 ③ 判据一：覆盖率分表算（合并算会得到「看着是数字、实际没意义」的比例）
+    # criterion one: coverage per table (merging gives a "looks like a number, means nothing" ratio)
     low_tables = []
     for tname, tstat in (fk_sum.get("per_table") or {}).items():
         if tstat.get("kind") != "value" or not tstat.get("denominator"):
-            continue   # facts/metrics 全 aggregate（分母 0）或 identities（只看 mention 覆盖率）
+            continue   # facts/metrics all aggregate (denominator 0) or identities (mention coverage only)
         ratio = tstat.get("explicit_ratio")
-        if ratio is None:      # task-71 ①：空分母 -> null，不进达标分母，也不报「低」
+        if ratio is None:      # empty denominator -> null, neither enters the passing denominator nor reports "low"
             continue
         if ratio < FK_EXPLICIT_RATIO_MIN:
             low_tables.append(tname)
@@ -4347,7 +4691,8 @@ def extract(chunk, schema, replay_text=None, prompt=None, rules=None, rules_path
                   "合并算的比例没意义，别用；达不到说明数据汇总段没和事件卡对齐，"
                   "需要单独处理（回来查 prompt 或汇总段切分）。"
                   % (FK_EXPLICIT_RATIO_MIN * 100, shown))
-    # task-71 ①：空分母表单列计数（比值是 null，不是 100%，也不进达标分母）
+    # empty-denominator tables are counted separately (ratio is null, not 100%, and they do not
+    # enter the passing denominator)
     if fk_sum["vacuous_tables"]:
         shown_v = "；".join(
             "%s（%s，rows %d，aggregate %d）"
@@ -4360,7 +4705,8 @@ def extract(chunk, schema, replay_text=None, prompt=None, rules=None, rules_path
                   "一张全是汇总值的 chunk 不会再显示「explicit 100%%」。"
                   % (fk_sum["vacuous_table_count"], shown_v,
                      ("、".join(fk_sum["scored_tables"]) if fk_sum["scored_tables"] else "无")))
-    # task-70 ①：aggregate / mention 单独报数（它们不是「低置信 nearest」，是两类不同的东西）
+    # aggregate / mention reported separately (they are not "low-confidence nearest", they are
+    # two different things)
     if fk_sum["aggregate"] or fk_sum["mention"]:
         warn_note(warnings, "fk_aggregate_mention",
                   "非 explicit 行已拆两类（task-70 ①）：aggregate %d 行（metrics/facts 派生汇总量，"
@@ -4368,7 +4714,7 @@ def extract(chunk, schema, replay_text=None, prompt=None, rules=None, rules_path
                   "锚点 source_chunk_id+抽取位置+quote，event_id 可选不硬造）。"
                   "跨表 join 只用 explicit/contain 行作答；分表覆盖率见 fk.per_table。"
                   % (fk_sum["aggregate"], fk_sum["mention"]))
-    # task-70 ③：identities 的 mention 覆盖率单独看（有 quote 且能定位就算）
+    # identities' mention coverage seen separately (has a quote and is locatable counts)
     ident = (fk_sum.get("per_table") or {}).get("identities") or {}
     if (ident.get("rows") and ident.get("mention_coverage") is not None
             and ident.get("mention_coverage") < 1.0):
@@ -4377,7 +4723,8 @@ def extract(chunk, schema, replay_text=None, prompt=None, rules=None, rules_path
                   "缺 quote/偏移的标识行只能靠 chunk 粗定位，回来查标识行的 quote 抽取。"
                   % (ident.get("locatable", 0), ident.get("rows", 0),
                      (ident.get("mention_coverage") or 0) * 100))
-    # task-69 ④：序号越界单独报红（不是静默回落）；「给错」和「没给」必须分开数
+    # out-of-range sequences report red separately (not a silent fallback); "wrong" and
+    # "missing" must be counted separately
     if fk_sum["hint_invalid"]:
         bad = fk_sum["hint_invalid_rows"]
         shown = "；".join("%s 给的序号=%r" % (r.get("where"), r.get("hint")) for r in bad[:10])
@@ -4390,42 +4737,47 @@ def extract(chunk, schema, replay_text=None, prompt=None, rules=None, rules_path
                   % (fk_sum["hint_invalid"], fk_sum["rows"], fk_sum["hint_ok"],
                      fk_sum["hint_invalid"], fk_sum["hint_missing"], shown, more))
 
-    # task-107 二：运行时子串校验（quote 每个字符串子字段都必须是原文连续子串）。
-    # 跑在内容闸/占比闸之前：丢行会改行数，先降级再统计，占比才不会被假引文撑高。
+    # runtime substring check (every string sub-field of quote must be a contiguous source
+    # substring). Runs before the content/ratio gates: dropping rows changes row counts, so
+    # degrade first then count, otherwise the ratio would be inflated by fake quotes.
     quote_sub = enforce_quote_substring(entities, rules, text, warnings,
                                         retried=bool(quote_retried_pieces))
-    # task-66 ① ②：两道内容硬校验（可精确判定 -> 闸）。跑在归一化之后、统计口径之前：
-    # 丢行会影响四表行数/quote 占比，所以必须先于 monitor/quote gate 执行。
+    # two content hard checks (precisely decidable -> gate). Runs after normalization, before
+    # counting: dropping rows affects four-table row counts / quote ratio, so must run before
+    # monitor/quote gate.
     content_gates = apply_content_gates(entities, rules, warnings)
-    # task-70 ④：通称不具名的形态闸（.bak / 纯后缀词）——只报警不丢行，跑在内容闸之后
+    # generic-term-not-naming shape gate (.bak / pure suffix word) — warn only, no drop, after the content gate
     generic_gate = apply_identity_generic_gate(entities, rules, warnings)
-    # task-70 ②（R12）：外键不变量——算得出就写、算不出就不写，不许悬空/占位
+    # foreign-key invariant (R12) — write when computable, not write when not, no dangling/placeholder
     fk_invariants = enforce_fk_invariants(entities, rules)
-    # task-78：time_norm 可复算硬闸（跟 event_id 复算同款）。跑在归一化/补全之后，
-    # 核的是「将要落盘的值」，不符就报红——时间列错了是键错，不能只记 warning。
+    # time_norm recomputation hard gate (same style as event_id recomputation). Runs after
+    # normalization/completion, checks "the value about to be written"; mismatch reports red —
+    # a wrong time column is a wrong key, not just a warning.
     time_norm_gate = enforce_time_norm_reproducible(entities, rules, norm_chunk, warnings)
-    # task-107 五(b)：精度自洽闸（day/minute/unknown 与 time_norm 对不上 = 红）
+    # precision self-consistency gate (day/minute/unknown mismatching time_norm = red)
     precision_gate = enforce_time_precision_consistent(entities, rules, warnings)
-    # task-107 三：端到端断言（从提问到答案）——字段新增必配一条，覆盖不全 = schema 错。
+    # end-to-end assertions (from question to answer) — every new field must ship with one;
+    # incomplete coverage = schema error.
     e2e_asserts = load_e2e_asserts(os.environ.get("EXTRACT_E2E_ASSERTS") or None)
     e2e_coverage = check_e2e_field_coverage(e2e_asserts)
     e2e_report = run_e2e_asserts(e2e_asserts, scope=[{
         "path": "(current chunk)",
         "source_chunk_id": chunk["source_chunk_id"],
         "entities": entities}], chunk=chunk)
-    # task-102 一：两条可追溯性断言（剪贴自检 + 推导自检）——新字段进来都过一遍。
+    # two traceability assertions (verbatim self-check + derivation self-check) — every new
+    # field goes through.
     traceability = traceability_assert(entities, rules, norm_chunk,
                                        trace_hits=ctx.get("trace_hits"), warnings=warnings)
-    # task-102 三：跨度报警——chunk 内跨度 > 24h 且含相对时间 => chunk 级基准不可信
+    # span alarm — in-chunk span > 24h and containing relative time => chunk-level base unreliable
     span_alarm = span_alarm_of(entities, rules, norm_chunk, warnings=warnings)
 
-    # task-66 ③：密度体检（不当闸；每 chunk 各表行数 + 标识数/千字符）
-    # task-76 ②：成本侧成对字段 calls_per_1k_chars = pieces / chars × 1000
+    # density inspection (not a gate; per-chunk table row counts + identities per thousand chars)
+    # cost-side paired field calls_per_1k_chars = pieces / chars × 1000
     density = density_stats(entities, len(text), content_gates.get("identity_table"),
                             pieces=len(pieces))
 
-    # task-77 ②：覆盖式断言（清单内漏抽=红，清单外=warning）。跑在计数之前，
-    # 这样 warning 文本/monitor 里都看得到「多抽了哪几条」。
+    # coverage-style assertion (missed within list = red, beyond list = warning). Runs before
+    # counting, so the warning text / monitor both show "which extras were over-extracted".
     coverage = None
     if expected is not None:
         coverage = expected_coverage(entities, expected)
@@ -4437,8 +4789,9 @@ def extract(chunk, schema, replay_text=None, prompt=None, rules=None, rules_path
                           % (table, len(info["extra"]),
                              "；".join(info["extra"][:5])))
 
-    # 三、两个监控项：warning 率 <5%、拒片率 <10%；超了明确说回来查 prompt 或拆片
-    # task-104 五：每项同时给 (分子, 分母)，分母=0 => unverified（未检验），不算通过
+    # the two monitoring items: warning rate <5%, reject rate <10%; over threshold says
+    # explicitly to come back and check the prompt or the split
+    # each item also reports (numerator, denominator); denominator=0 => unverified, not passing
     counts = {k: len(v) for k, v in entities.items()}
     rows_total = sum(counts.values())
     warn_rows = len({(w.get("piece"), w.get("where")) for w in warnings if w.get("where")})
@@ -4463,21 +4816,21 @@ def extract(chunk, schema, replay_text=None, prompt=None, rules=None, rules_path
                              == "unverified"],
         "retries": retries, "retry_max": max_retries(), "dropped_rows": dropped,
         "failed": failed,
-        "content_gates": content_gates,   # task-66 ①②：红没红、丢了几行（闸，不是体检）
-        "identity_generic": generic_gate,  # task-70 ④：通称不具名（.bak / 纯后缀词）
-        "fk_invariants": fk_invariants,    # task-70 ②：外键不变量（R12 可选字段）
-        "time_norm_gate": time_norm_gate,  # task-78：时间列可复算（不符=红，不是 warning）
-        "precision_gate": precision_gate,  # task-107 五b：精度与 time_norm 自洽（不符=红）
-        # task-107 二：quote 子串校验（降级=红，看得见）；task-108：这里先放 gate_raw，
-        # 函数结尾会换成 {gate_raw, gate_final} 两份（判据只看 gate_final）。
+        "content_gates": content_gates,   # red or not, how many rows dropped (a gate, not inspection)
+        "identity_generic": generic_gate,  # generic term not naming anything (.bak / pure suffix word)
+        "fk_invariants": fk_invariants,    # foreign-key invariant (R12 optional field)
+        "time_norm_gate": time_norm_gate,  # time column recomputable (mismatch=red, not a warning)
+        "precision_gate": precision_gate,  # precision self-consistent with time_norm (mismatch=red)
+        # quote substring check (degradation=red, visible); here first put gate_raw, the function
+        # end replaces it with {gate_raw, gate_final} (criterion only looks at gate_final).
         "quote_substring_gate": quote_sub,
-        "e2e": {"coverage": e2e_coverage, "report": e2e_report},  # task-107 三：端到端断言
-        "traceability_gate": traceability,  # task-102 一：剪贴自检 + 推导自检
-        "span_alarm": span_alarm,          # task-102 三：chunk 级基准可信度
+        "e2e": {"coverage": e2e_coverage, "report": e2e_report},  # end-to-end assertions
+        "traceability_gate": traceability,  # verbatim self-check + derivation self-check
+        "span_alarm": span_alarm,          # chunk-level base reliability
         "time_base": {"source": base_source, "granularity": base_granularity,
                       "base": base_iso},
-        "density": density,               # task-66 ③：只体检，不当闸
-        "expected_coverage": coverage,    # task-77 ②：覆盖式断言（漏=红 / 多=warning）
+        "density": density,               # inspection only, not a gate
+        "expected_coverage": coverage,    # coverage-style assertion (missed=red / extra=warning)
     }
     if content_gates["red"]:
         warn_note(warnings, "content_gate_red",
@@ -4496,7 +4849,7 @@ def extract(chunk, schema, replay_text=None, prompt=None, rules=None, rules_path
                   "warning 率 %d/%d=%.2f%% 超过 %.1f%% 阈值：回来查 prompt 或拆片"
                   % (warn_rows, rows_total, (warning_rate or 0) * 100, WARNING_RATE_MAX * 100))
     elif monitor["warning_rate_verdict"] == "unverified":
-        # task-104 五：分母=0 不是「通过」，是「没检验」——必须说出来，不能静默显示绿
+        # denominator=0 is not "passing", it is "unverified" — must be said, no silent green
         warn_note(warnings, "gate_unverified",
                   "warning 率闸未检验（分母=0：没有可统计的行）——task-104 五：分母=0 一律不算通过")
     if monitor["reject_rate_verdict"] == "fail":
@@ -4507,8 +4860,8 @@ def extract(chunk, schema, replay_text=None, prompt=None, rules=None, rules_path
         warn_note(warnings, "gate_unverified",
                   "拒片率闸未检验（分母=0：没有片）——task-104 五：分母=0 一律不算通过")
 
-    # task-77 ②：清单内漏抽 = 红（不是「少抽一点」）——写成 chunk 级 warning，
-    # 由 main() 决定退出码（2），这样产物仍然落盘、留痕里看得到漏了哪几条。
+    # missed within the list = red (not "missing a little") — written as a chunk-level warning;
+    # main() decides the exit code (2), so the output still lands and the trail shows which ones were missed.
     if coverage is not None and not coverage["ok"]:
         miss = []
         for table in EXPECTED_TABLES:
@@ -4518,7 +4871,7 @@ def extract(chunk, schema, replay_text=None, prompt=None, rules=None, rules_path
                   "覆盖式断言报红（task-77 ②）：人工清单内漏抽 %d 条 —— %s"
                   % (coverage["missing_total"], "；".join(miss[:8])))
 
-    # 四、quote 占比 gate（task-74 分母 A）：缺引文的行剔除分母、单列缺口，不整份作废
+    # quote ratio gate (denominator A): missing-quote rows removed from denominator, gap listed separately, not a whole-run failure
     quote_gate = enforce_quote_ratio(entities, schema, warnings)
     if quote_gate["quote_missing"]:
         warn_note(warnings, "rows_quote_missing",
@@ -4527,12 +4880,14 @@ def extract(chunk, schema, replay_text=None, prompt=None, rules=None, rules_path
                   % (quote_gate["quote_missing"], quote_gate["rows"],
                      quote_gate["gap_ratio"] * 100, quote_gate["ratio"] * 100))
 
-    # task-68 ③：nearest 行标低置信、不进答案——统计完把临时标记剥掉（最终产物不留痕）
+    # nearest rows marked low confidence, do not answer — strip the temporary marker after
+    # counting (the final output leaves no trace)
     answer = answer_stats(entities)
     fk_sum["answer"] = answer
-    # task-71 ②：answer_rows 与 explicit_ratio 并列当判据——覆盖率达标 ≠ 能答题。
-    # 跨表 join 的前提是「相关事件与数据行都在 answer 里」；aggregate/mention 不进答案，
-    # 所以覆盖率 100% 的 chunk 也可能只剩个位数行能 join。
+    # answer_rows judged alongside explicit_ratio — coverage passing != answerable. Cross-table
+    # join requires "the relevant event and data row are both in answer"; aggregate/mention do
+    # not enter the answer, so a 100%-coverage chunk may still have only single-digit joinable
+    # rows.
     if answer["answer_ok"] is False:
         warn_note(warnings, "fk_answer_rows_low",
                   "能答题的行太少（task-71 ②，与 explicit_ratio 并列的判据）："
@@ -4549,19 +4904,20 @@ def extract(chunk, schema, replay_text=None, prompt=None, rules=None, rules_path
             if isinstance(row, dict):
                 row.pop("__fk_method", None)
 
-    # task-73 ①：没有锚点的行不静默消失（清单进结果 + chunk 级提示）
+    # rows without an anchor do not silently vanish (list into result + chunk-level hint)
     if unlocated:
         warn_note(warnings, "rows_unlocated",
                   "%d 行既无 抽取位置、无 quote，也没有能回原文的文字锚点（task-73 ①）："
                   "行没静默丢，清单见 unlocated_rows；缺的是引文，不是事实" % len(unlocated))
     monitor["unlocated_rows"] = len(unlocated)
-    # task-74：引文缺口单列（与覆盖率分开记，不混成一个数）
+    # the quote gap is listed separately (kept apart from coverage, not merged into one number)
     monitor["quote_missing_rows"] = len(quote_gate.get("quote_missing_rows") or [])
     monitor["quote_gap_ratio"] = quote_gate.get("gap_ratio")
 
-    # task-108（审查端 P349）：闸分两份输出——上面 quote_sub 是 gate_raw（清洗前，含被丢掉的
-    # quote.归一化 这类），这里在**最终产物**上再复算一次 = gate_final，判据只看它。
-    # 复算必须放在所有丢行/丢字段/降级之后（即 entities 已经是落盘状态），否则又回到「跑清洗前」。
+    # the gate outputs two copies — the quote_sub above is gate_raw (pre-scrub, including the
+    # dropped quote.归一化 type); here a recompute on the **final output** = gate_final, the
+    # only criterion. The recompute must come after all row/field drops and degradations (i.e.
+    # entities is already in written state), otherwise it is back to "running pre-scrub".
     quote_final = quote_substring_report(entities, rules, text)
     quote_gates = quote_substring_gates(quote_sub, quote_final)
     monitor["quote_substring_gate"] = quote_gates
@@ -4572,8 +4928,9 @@ def extract(chunk, schema, replay_text=None, prompt=None, rules=None, rules_path
                   "monitor.quote_substring_gate.gate_final"
                   % (quote_final["invalid"], quote_sub.get("invalid", 0)))
 
-    # task-109（审查端 P350）：所有闸统一收口——计数器一律 int、None 落成 0 + unverified、
-    # 每个闸补 report_line。没给 --expected 清单时覆盖断言是「没数」，明写 unverified 而不是 None。
+    # all gates close out uniformly — counters always int, None landed to 0 + unverified, every
+    # gate gets report_line. Without --expected the coverage assertion is "uncounted", written
+    # as unverified rather than None.
     quote_gate = normalize_gate("quote_gate", quote_gate)
     if coverage is None:
         coverage = {"unverified": True, "verdict": "unverified",
@@ -4616,10 +4973,10 @@ def extract(chunk, schema, replay_text=None, prompt=None, rules=None, rules_path
 
 
 def append_build_log(entry, path=None):
-    """task-63 ②：fk_method 必须进构建日志（nearest 占比高不能默默发生）。
+    """fk_method must go into the build log (a high nearest share must not happen silently).
 
-    task-72 ②：日志落哪个目录由 --log-dir 定（默认仍是 out/build_log.jsonl）；
-    条目里带 out / log / repeat，日志在哪不再靠口头约定。
+    The log directory is set by --log-dir (default still out/build_log.jsonl); the entry
+    carries out / log / repeat, so the log location is no longer an oral convention.
     """
     target = pathlib.Path(path) if path else BUILD_LOG
     try:
@@ -4627,14 +4984,15 @@ def append_build_log(entry, path=None):
         with open(target, "a", encoding="utf-8", newline="\n") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except OSError:
-        pass  # 日志写不进去不该吞掉抽取结果
+        pass  # a failed log write must not swallow the extraction result
 
 
 def build_log_entry(chunk, result, out_path, log_path, repeat, stability=None):
-    """task-72 ②：日志条目自带落盘位置（out / log / repeat），方便核「日志在哪」。"""
+    """The log entry carries its own landing location (out / log / repeat), easy to verify
+    "where the log is"."""
     entry = {"chunk": chunk["source_chunk_id"], "source": result["source"],
              "pieces": result["pieces"],
-             # task-75：参数一旦变（6000 -> 1200），日志要能解释 prompt sha 为什么变
+             # once a parameter changes (6000 -> 1200), the log must explain why prompt sha changed
              "max_chunk_chars": result.get("max_chunk_chars"),
              "split_on": result.get("split_on"),
              "chars": len(chunk["text"]),
@@ -4765,7 +5123,7 @@ def main(argv=None):
                               "piece_chars": [b - a for a, b in pieces]}, ensure_ascii=False))
             return 0
         repeats = max(1, int(args.repeat or 1))
-        # task-72 ①：重复跑同一 chunk（temperature 固定 0，deepseek_api.call 的默认值）
+        # repeat the same chunk (temperature fixed 0, deepseek_api.call's default)
         replay_docs = load_replays(args.replay, repeats) if args.replay else None
         results = []
         for k in range(repeats):
@@ -4789,12 +5147,12 @@ def main(argv=None):
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(result["entities"], ensure_ascii=False, indent=2) + "\n",
                         encoding="utf-8")
-    # task-72 ②：日志落到 --log-dir（与 --out 同目录即「一处可查」）；条目自带 out/log/repeat
+    # log lands in --log-dir (same directory as --out = "one place to check"); entry carries out/log/repeat
     log_path = (pathlib.Path(args.log_dir) / "build_log.jsonl") if args.log_dir else BUILD_LOG
     for k, res in enumerate(results):
         append_build_log(build_log_entry(chunk, res, out_path, log_path, k + 1,
                                          stability if k == 0 else None), log_path)
-    # task-72 ③：落每行作答索引，供 --pair-check 逐题验成对覆盖
+    # write the per-row answer index, for --pair-check to verify pairwise coverage per question
     ai_path = pathlib.Path(args.answer_index) if args.answer_index else None
     if ai_path is not None:
         ai_path.parent.mkdir(parents=True, exist_ok=True)
@@ -4837,8 +5195,8 @@ def main(argv=None):
                       "stability": stability,
                       "expected_coverage": result.get("expected_coverage"),
                       "meta": result["meta"]}, ensure_ascii=False, indent=2))
-    # task-109（审查端 P350）：计数器还有 None、或有闸没有 report_line = 这一格没做完
-    # （产物照落盘，退出码 2——None 会被人当成「没问题」，所以必须硬失败）。
+    # counters still None, or a gate without report_line = this cell is not finished (output
+    # still written, exit code 2 — None would be treated as "no problem", so it must hard-fail).
     nones = find_none_counters(result)
     no_line = find_gates_missing_report_line(result)
     if nones or no_line:
@@ -4849,8 +5207,8 @@ def main(argv=None):
                  "、".join(no_line) if no_line else "无"), file=sys.stderr)
         return 2
     cov = result.get("expected_coverage")
-    # task-109：没给 --expected 时 cov 是 {"unverified": true, ...}（不是 None），所以判据认 ok is False，
-    # 不能写 `not cov.get("ok")`（那会把「没数」当「没过」）。
+    # without --expected, cov is {"unverified": true, ...} (not None), so the criterion checks
+    # ok is False, not `not cov.get("ok")` (which would treat "uncounted" as "failed").
     if cov and cov.get("ok") is False:
         miss = []
         for table in EXPECTED_TABLES:
@@ -4859,8 +5217,9 @@ def main(argv=None):
         print("EXPECTED COVERAGE FAILED: 人工清单内漏抽 %d 条：%s"
               % (cov["missing_total"], "；".join(miss[:8])), file=sys.stderr)
         return 2
-    # task-78：time_norm 复算不符/解不出 = 红（退出码 2）。产物已落盘，留痕里能查到哪一行：
-    # 时间列是「取最新」的唯一依据，重算对不上等于键错了，不能当 warning 混过去。
+    # time_norm recomputation mismatch/unparseable = red (exit code 2). Output already written;
+    # the trail shows which row: the time column is the sole basis for "take the latest", a
+    # recomputation mismatch equals a wrong key, not passable as a warning.
     tng = result.get("time_norm_gate") or {}
     trg = result.get("traceability_gate") or {}
     if tng.get("red") or trg.get("red"):
@@ -4874,7 +5233,7 @@ def main(argv=None):
               % (tng.get("mismatch", 0), tng.get("unreproducible", 0),
                  "；".join(details)), file=sys.stderr)
         return 2
-    # task-107 五(b)：精度不自洽 = 红（退出码 2）；task-107 三：端到端断言答不对 = 红
+    # precision self-inconsistency = red (exit code 2); end-to-end assertion answered wrong = red
     pg = result.get("precision_gate") or {}
     e2e = (result.get("e2e") or {}).get("report") or {}
     if pg.get("red") or (e2e.get("total") and not e2e.get("ok")):
@@ -4884,8 +5243,9 @@ def main(argv=None):
                           for m in (pg.get("rows") or [])[:5])),
               file=sys.stderr)
         return 2
-    # task-108（审查端 P349）：判据只看 gate_final —— 最终产物里还剩非原文 quote = 红（退出码 2）。
-    # gate_raw 红不算不过（那是「模型这次给了改写、被清洗掉了」的诊断信息）。
+    # the criterion only looks at gate_final — a non-source quote remaining in the final output
+    # = red (exit code 2). gate_raw red is not a failure (it is the diagnostic "the model gave
+    # a rewrite this time, and it was scrubbed").
     qg = result.get("quote_substring_gate") or {}
     gfinal = qg.get("gate_final") or {}
     graw = qg.get("gate_raw") or {}

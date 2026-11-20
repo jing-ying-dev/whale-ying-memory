@@ -1,14 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-whale_ying —— 我们的记忆系统（抽取器）接入 MemoryAgentBench 的薄适配。
+whale_ying — a thin adapter connecting the memory system (extractor) to MemoryAgentBench.
 
-1. memorize：把 benchmark 喂来的 chunk **攒起来**，第一次 query 时**并发**交给抽取器 extract()
-   （chunk 独立、可并行；改前是逐段串行）。
-2. query：折叠取最新（_fold_latest），BM25+向量+RRF 混合检索，再 **LLM 重排**（RankGPT 式
-   listwise，照 sunnweiwei/RankGPT 的 permutation_pipeline），拼进 prompt 交给 gpt-4o-mini 作答。
-3. 不夹带：不做翻译 / 兜底 / 重排之外的重排。
+1. memorize: accumulate chunks fed in by the benchmark, then hand them to the extractor
+   concurrently (extract()) on the first query (chunks are independent and can run in
+   parallel; previously they were processed serially).
+2. query: fold to the latest values (_fold_latest), BM25 + vector + RRF hybrid retrieval,
+   then LLM reranking (RankGPT-style listwise, following sunnweiwei/RankGPT's
+   permutation_pipeline), which is fed into the prompt for gpt-4o-mini to answer.
+3. No smuggling: no translation / fallback / rerank-beyond-rerank.
 
-⑤ memory_construction_time 语义：从「检索耗时」改成「累计抽取耗时」。
+memory_construction_time semantics: changed from "retrieval time" to "cumulative extraction time".
 """
 
 import json
@@ -19,9 +21,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-# Repository-local paths. The original benchmark copy lived under
-# l1test/MemoryAgentBench/methods; the open-source layout keeps the extractor
-# next to this adapter so the module remains portable after cloning.
+# Repository-local paths. The open-source layout keeps the extractor next to this
+# adapter so the module remains portable after cloning.
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXTRACTOR_DIR = REPO_ROOT / "extractor"
 if str(EXTRACTOR_DIR) not in sys.path:
@@ -36,8 +37,9 @@ _STOP = ("the", "a", "an")
 
 
 def _fact_subject(row):
-    """事实身份键 = 等式主语 + 关系（copula 用主语，relation 用主语|动词短语）。
-    确定性 regex 抠，不靠 LLM 填离散字段。"""
+    """Fact identity key = equation subject + relation (copula uses the subject,
+    relation uses subject|verb phrase). Extracted with deterministic regex, not by
+    asking an LLM to fill discrete fields."""
     eq = str(row.get("等式") or row.get("左值指标名") or "").strip()
     m = re.match(r"(.*?)\s+(is|was|plays|speaks|works|died|worked)\b", eq)
     if not m:
@@ -60,7 +62,7 @@ def _fact_subject(row):
 
 
 def _item_key(row, table):
-    """item 键 = 4 表自身主键（metrics 用指标名、facts 用等式主语）。"""
+    """Item key = each of the four tables' own primary key (metrics uses the metric name, facts uses the equation subject)."""
     if table == "metrics":
         return "metric:" + str(row.get("指标名", ""))
     if table == "facts":
@@ -69,7 +71,7 @@ def _item_key(row, table):
 
 
 def _fold_latest(rows):
-    """折叠取最新（supersession current + 排除 discarded，照 our_integration.py）。"""
+    """Fold to latest (supersession current + drop discarded, as in our_integration.py)."""
     deleted_objs = set()
     for r in rows:
         if r.get("table") == "deleted":
@@ -98,7 +100,7 @@ def _fold_latest(rows):
 
 
 def _append_entities(agent, entities):
-    """把一批抽取结果（四表行）按 bi-temporal/supersession 规则追加进 agent.rows。"""
+    """Append one batch of extraction results (four-table rows) into agent.rows following bi-temporal/supersession rules."""
     for table in ("metrics", "facts", "cards", "identities"):
         for row in entities.get(table, []):
             if not isinstance(row, dict):
@@ -121,7 +123,7 @@ def _append_entities(agent, entities):
 
 
 def _extract_one(agent, context_id, seq, text):
-    """抽一段 chunk，返回 (entities, dt)。异常吞掉返回空 entities，不打断整批。"""
+    """Extract one chunk, returning (entities, dt). Exceptions are swallowed and yield empty entities without interrupting the batch."""
     chunk = {"source_chunk_id": "ctx%d_c%d" % (context_id or 0, seq),
              "text": text, "time_ref": ""}
     t0 = time.time()
@@ -135,7 +137,7 @@ def _extract_one(agent, context_id, seq, text):
 
 
 def _extract_pending(agent):
-    """把攒下的 chunk 并发抽完，按**原顺序**合并进 agent.rows（保 _version 的 serial 语义）。"""
+    """Extract all pending chunks concurrently and merge them into agent.rows in original order (preserving _version's serial semantics)."""
     chunks = agent._pending_chunks
     agent._pending_chunks = []
     if not chunks:
@@ -166,14 +168,14 @@ def initialize_our_agent(agent, agent_config=None):
     agent.retrieve_num = config.get("retrieve_num", 10)
     agent.rows = []
     agent._chunk_seq = 0
-    agent._pending_chunks = []   # 并行抽取：先攒后抽
-    agent._extract_time = 0.0    # ⑤ 累计抽取耗时（memorize 阶段）
+    agent._pending_chunks = []   # concurrent extraction: accumulate first, extract later
+    agent._extract_time = 0.0    # cumulative extraction time (memorize phase)
     agent._n_chunks = 0
     agent._bm25 = None
     agent._bm25_texts = None
     agent._emb_model = None
-    agent._emb_failed = False    # 向量模型加载失败就永久退回 BM25-only
-    agent._retr_cache = None     # 检索缓存：BM25 索引 + 整库向量只建一次（治每题全库重编码 ~60s）
+    agent._emb_failed = False    # if the vector model fails to load, permanently fall back to BM25-only
+    agent._retr_cache = None     # retrieval cache: BM25 index + whole-library vectors built once (avoids re-encoding the whole library per question)
     # Load a repository-local .env when present; secrets remain outside source control.
     try:
         from dotenv import load_dotenv
@@ -187,9 +189,10 @@ def initialize_our_agent(agent, agent_config=None):
     print("\n[whale_ying] extractor loaded\n")
 
 
-# ---------------- 检索：多字段 BM25（subject 3:1 body）+ 向量 + RRF ----------------
-# 依据 ADR-079（ruflo）：json 字段名污染 + bi-encoder 小语料噪声 是「噪声事实顶替」两个元凶；
-# subject 短字段单独建 IDF 才救回信号。tokenizer 只留 a-z0-9_-/.、长度≥3、去停用词。
+# ---------------- Retrieval: multi-field BM25 (subject 3:1 body) + vector + RRF ----------------
+# JSON field-name pollution plus small-corpus bi-encoder noise are the two causes of
+# "noisy facts replacing real ones"; building a separate IDF for the short subject
+# field recovers the signal. The tokenizer keeps only a-z0-9_-/., length >= 3, drops stopwords.
 _TOKEN_RE = re.compile(r"[a-z0-9_\-/.]+")
 _STOPWORDS = frozenset({
     "the", "a", "an", "of", "in", "to", "at", "for", "with", "on", "by", "from",
@@ -201,13 +204,13 @@ _STOPWORDS = frozenset({
 
 
 def _tokenize(text):
-    """干净分词：只留 a-z0-9_-/.、长度≥3、去停用词（治字段名污染 + 高频词稀释）。"""
+    """Clean tokenization: keep only a-z0-9_-/., length >= 3, drop stopwords (fixes field-name pollution + high-frequency word dilution)."""
     return [t for t in _TOKEN_RE.findall(str(text or "").lower())
             if len(t) >= 3 and t not in _STOPWORDS]
 
 
 def _subject_body(row):
-    """(subject, body)：subject=高信号短字段（3 权），body=长内容（1 权）。"""
+    """(subject, body): subject = high-signal short field (weight 3), body = long content (weight 1)."""
     t = row.get("table")
     if t == "facts":
         return (str(row.get("左值指标名") or ""), str(row.get("等式") or ""))
@@ -219,8 +222,10 @@ def _subject_body(row):
 
 
 def _build_retrieval_cache(agent, rows):
-    """把检索要用的「BM25 索引 + 整库向量」一次建好缓存；之后每题只算 query 侧。
-    之前每题全库重编码（16k 条 ~60s），是 262k 复测 1h 的主因（照 FAISS「索引一次、查询多次」）。"""
+    """Build the retrieval cache (BM25 index + whole-library vectors) once; each
+    subsequent question only computes the query side. Previously the whole library
+    was re-encoded per question (16k rows, ~60s), which dominated rerun time
+    (build the index once, query many times, as with FAISS)."""
     from rank_bm25 import BM25Okapi
     subj_strs, body_strs = [], []
     for r in rows:
@@ -239,7 +244,7 @@ def _build_retrieval_cache(agent, rows):
             if agent._emb_model is None:
                 from sentence_transformers import SentenceTransformer
                 agent._emb_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
-            # 向量侧用正文（body 等式为主，空则回退 subject），不再喂整条 json
+            # vector side uses the body text (body equation first, fall back to subject), no longer feed the whole json
             vec_texts = [b or s for s, b in zip(subj_strs, body_strs)]
             ce = agent._emb_model.encode(vec_texts, normalize_embeddings=True)
         except Exception as e:  # noqa: BLE001
@@ -251,8 +256,9 @@ def _build_retrieval_cache(agent, rows):
 
 
 def _hybrid_retrieve(agent, message, rows):
-    """多字段 BM25（subject 3:1 body 各自建 IDF）+ 向量 + RRF 混合检索。
-    BM25 索引与整库向量只建一次（缓存复用），每题只算 query 编码 + 点积。"""
+    """Hybrid retrieval: multi-field BM25 (subject and body each build their own IDF)
+    + vector + RRF. The BM25 index and whole-library vectors are built once (cached
+    and reused); each question only computes the query encoding + dot product."""
     cache = agent._retr_cache
     if cache is None or cache.get("n") != len(rows):
         cache = _build_retrieval_cache(agent, rows)
@@ -288,10 +294,10 @@ def _hybrid_retrieve(agent, message, rows):
     return order
 
 
-# ---------------------------------------------------------------- LLM 重排 + 去重（RankGPT 式 + 同主语留最新）
+# ---------------------------------------------------------------- LLM rerank + dedup (RankGPT-style + keep latest per subject)
 
 def _card_pos(r):
-    """抽卡片的原文位置（抽取位置），用于排序（旧→新）。"""
+    """Extract a card's source position (extraction position), used for ordering (old -> new)."""
     if isinstance(r, dict):
         try:
             return int(r.get("抽取位置") or 0)
@@ -301,7 +307,7 @@ def _card_pos(r):
 
 
 def _card_summary(r):
-    """卡片的自然语言一句话总结（给重排/去重 LLM 读，只看这一句，不看 json 字段名）。"""
+    """One-sentence natural-language summary of a card (for the rerank/dedup LLM to read; it reads only this sentence, not the json field names)."""
     t = r.get("table")
     if t == "facts":
         return str(r.get("等式") or r.get("左值指标名") or "")
@@ -313,7 +319,7 @@ def _card_summary(r):
 
 
 def _build_rerank_prompt(query, summaries):
-    """纯排序：按相关度从高到低排。去重已由存储侧确定性主语折叠做完，这里只排序。"""
+    """Pure ranking: sort by relevance from high to low. Dedup is already handled by the storage-side deterministic subject folding; this only ranks."""
     num = len(summaries)
     parts = ["query: %s" % query, ""]
     parts.append("下面有 %d 张记忆卡片（每张编号 [i]，内容=一句自然语言总结）：" % num)
@@ -327,7 +333,7 @@ def _build_rerank_prompt(query, summaries):
 
 
 def _parse_rank(text, num):
-    """解析 LLM 输出的排序编号（去重 + 补漏，保证是全排列）。"""
+    """Parse the ranking indices output by the LLM (dedup + fill in missing, guaranteeing a full permutation)."""
     order = []
     for d in re.findall(r"\d+", text):
         i = int(d) - 1
@@ -338,8 +344,9 @@ def _parse_rank(text, num):
 
 
 def _llm_rerank(agent, query, rows):
-    """对 top-K 行做 listwise 重排 + 去重。先按抽取位置升序（旧→新），再让 LLM 排序+留最新。
-    返回重排+去重后的行列表（LLM 给序）。失败则原序。"""
+    """Listwise rerank + dedup the top-K rows. First sort by extraction position
+    ascending (old -> new), then let the LLM rank and keep the latest. Returns the
+    reranked + deduped row list (order given by the LLM); on failure, the original order."""
     if len(rows) <= 1:
         return list(rows)
     sorted_rows = sorted(rows, key=_card_pos)
@@ -357,7 +364,7 @@ def _llm_rerank(agent, query, rows):
         return list(rows)
 
 
-# ---------------------------------------------------------------- post-retrieval assembly（CAR 式：抽候选 → 确定性选最新）
+# ---------------------------------------------------------------- post-retrieval assembly (CAR-style: extract candidates -> deterministically pick latest)
 
 CANDIDATE_PROMPT = """You are given retrieved items from a knowledge pool. Each item has a FRESHNESS marker (the prefix integer) — higher marker = newer version.
 
@@ -381,7 +388,7 @@ Return ONLY valid JSON: {"candidates": [{"serial": <int>, "fact_text": "<verbati
 
 
 def _format_pool(rows):
-    """把 top-K 行格式化成「序号. 等式」的知识池（序号 = _version 即插入序 ≈ 基准 serial）。"""
+    """Format the top-K rows into a knowledge pool of "index. equation" (index = _version, i.e. insertion order ~= benchmark serial)."""
     lines = []
     for r in rows:
         serial = r.get("_version") if isinstance(r.get("_version"), int) else 0
@@ -391,7 +398,7 @@ def _format_pool(rows):
 
 
 def _extract_candidates(agent, query, rows):
-    """LLM 抽候选：只找语义匹配项、不选赢家（照 CAR CANDIDATE_PROMPT）。返回 (candidates, in_tok, out_tok)。"""
+    """LLM candidate extraction: find only semantic matches, don't pick a winner (per CAR CANDIDATE_PROMPT). Returns (candidates, in_tok, out_tok)."""
     pool = _format_pool(rows)
     try:
         resp = agent._create_oai_client().chat.completions.create(
@@ -405,14 +412,14 @@ def _extract_candidates(agent, query, rows):
         candidates = json.loads(raw).get("candidates", [])
         in_tok = resp.usage.prompt_tokens
         out_tok = resp.usage.completion_tokens
-    except Exception:  # noqa: BLE001 —— 解析/调用失败返空，交给兜底
+    except Exception:  # noqa: BLE001 — parse/call failure returns empty, handled by the fallback
         return [], 0, 0
     out = [c for c in candidates if isinstance(c, dict) and c.get("answer_entity")]
     return out, in_tok, out_tok
 
 
 def _freshness_pick(candidates):
-    """确定性执行「取最新」：serial 最大者胜（照 CAR max(candidates, key=serial)）。"""
+    """Deterministically "pick the latest": the largest serial wins (per CAR max(candidates, key=serial))."""
     if not candidates:
         return ""
     chosen = max(candidates, key=lambda c: c.get("serial") if isinstance(c.get("serial"), int) else 0)
@@ -420,7 +427,7 @@ def _freshness_pick(candidates):
 
 
 def _direct_answer(agent, message, final_rows, chain=None):
-    """一步作答。返回 (text, in_tok, out_tok)。chain 可选：[(子问题, 中间答案)] 拼在记忆前。"""
+    """Answer in one step. Returns (text, in_tok, out_tok). `chain` is an optional list of [(sub-question, intermediate answer)] placed before the memory."""
     from utils.templates import get_template
     from utils.eval_data_utils import format_chat
     mem_lines = []
@@ -434,7 +441,7 @@ def _direct_answer(agent, message, final_rows, chain=None):
     ask = (memory_string + "\n" + message) if memory_string else message
     system_message = get_template(agent.sub_dataset, "system", agent.agent_name)
     format_message = format_chat(message=ask, system_message=system_message)
-    # 机场掉线（SSL EOF）会抛 APIConnectionError：答不出返空（该题计错），别让整轮崩掉
+    # A dropped connection (SSL EOF) raises APIConnectionError: return empty (that question is marked wrong) rather than crashing the whole run
     for attempt in range(3):
         try:
             kwargs = dict(
@@ -460,7 +467,7 @@ def _direct_answer(agent, message, final_rows, chain=None):
     return ("", 0, 0)
 
 
-# ---------------------------------------------------------------- Self-Ask 式迭代（多跳：首答→自评→子问题→再检索→重答）
+# ---------------------------------------------------------------- Self-Ask style iteration (multi-hop: first answer -> self-check -> sub-question -> re-retrieve -> re-answer)
 
 SELFCHECK_PROMPT = """You are checking whether an answer to a question is fully supported by retrieved memory facts.
 
@@ -491,7 +498,7 @@ Answer:"""
 
 
 def _chat(agent, messages, max_tokens=300, temperature=0.0, json_mode=False):
-    """简单 OpenAI-compatible 调用，返回 (text, in_tok, out_tok)；失败 ("", 0, 0)。"""
+    """Simple OpenAI-compatible call, returning (text, in_tok, out_tok); on failure ("", 0, 0)."""
     try:
         kwargs = dict(model=agent.model, messages=messages,
                       temperature=temperature, max_tokens=max_tokens)
@@ -508,7 +515,7 @@ def _chat(agent, messages, max_tokens=300, temperature=0.0, json_mode=False):
 
 
 def _facts_text(rows, limit=20):
-    """行 → 「一行一条自然语言」给 LLM 读（复用 _card_summary，只看这句不看 json 字段名）。"""
+    """Rows -> one natural-language line per row for the LLM to read (reuses _card_summary; reads only this sentence, not the json field names)."""
     return "\n".join(_card_summary(r) for r in rows[:limit]) or "(none)"
 
 
@@ -517,7 +524,7 @@ def _chain_text(chain):
 
 
 def _selfcheck(agent, question, answer, facts_rows, chain):
-    """自评：答案是否充分。返回 (dict, in_tok, out_tok)。解析失败按 {ok:true}（不折腾）。"""
+    """Self-check whether the answer is sufficient. Returns (dict, in_tok, out_tok). On parse failure treat as {ok:true} (don't fight it)."""
     raw, in_tok, out_tok = _chat(
         agent,
         [{"role": "user", "content": SELFCHECK_PROMPT.replace("{question}", question)
@@ -531,7 +538,7 @@ def _selfcheck(agent, question, answer, facts_rows, chain):
 
 
 def _answer_short(agent, question, facts_rows):
-    """子问题短答（只回实体）。返回 (text, in_tok, out_tok)。"""
+    """Short answer to a sub-question (entity only). Returns (text, in_tok, out_tok)."""
     return _chat(
         agent,
         [{"role": "user", "content": ANSWER_SHORT_PROMPT.replace("{question}", question)
@@ -540,8 +547,10 @@ def _answer_short(agent, question, facts_rows):
 
 
 def _iterative_answer(agent, message, retrieval_query, rows, initial_rows, max_rounds=2):
-    """Self-Ask 式迭代：首答 → 自评「是否合理/充分」→ 若需子问题 → 检索+短答 → 拼进证据重答。
-    治多跳：单次检索链不起中间实体。上限 max_rounds 轮。返回 (text, in_tok, out_tok)。"""
+    """Self-Ask style iteration: first answer -> self-check "is it reasonable/sufficient"
+    -> if a sub-question is needed -> retrieve + short answer -> re-answer with the
+    evidence. Fixes multi-hop questions where a single retrieval cannot recover the
+    intermediate entity. Capped at max_rounds rounds. Returns (text, in_tok, out_tok)."""
     total_in = 0
     total_out = 0
     evidence = list(initial_rows)
@@ -587,7 +596,7 @@ def _iterative_answer(agent, message, retrieval_query, rows, initial_rows, max_r
 
 def handle_our_agent(agent, message, memorizing, query_id=None, context_id=None):
     if memorizing:
-        # 并行抽取：先攒，不立即抽；第一次 query 时并发抽完
+        # concurrent extraction: accumulate now, extract later on the first query
         agent._pending_chunks.append(
             {"context_id": context_id or 0, "seq": agent._chunk_seq, "text": message})
         agent._chunk_seq += 1
@@ -595,13 +604,13 @@ def handle_our_agent(agent, message, memorizing, query_id=None, context_id=None)
 
     # query
     start = time.time()
-    # 两阶段分进程跑：阶段2 设 WHALE_YING_STORE_LOAD 直接读已抽好的 store（跳过 DeepSeek 抽取）
+    # Two stages run as separate processes: stage 2 sets WHALE_YING_STORE_LOAD to read the already-extracted store directly (skipping DeepSeek extraction)
     load_path = os.environ.get("WHALE_YING_STORE_LOAD", "").strip()
     if load_path:
         agent.rows = json.load(open(load_path, encoding="utf-8"))
     else:
-        _extract_pending(agent)   # 把攒下的 chunk 并发抽完（空则跳过，幂等）
-    # 阶段1：设 WHALE_YING_STORE_SAVE 则抽完即存盘退出（只抽不答）
+        _extract_pending(agent)   # extract all pending chunks concurrently (no-op when empty)
+    # Stage 1: if WHALE_YING_STORE_SAVE is set, save the store and exit after extracting (extract-only)
     save_path = os.environ.get("WHALE_YING_STORE_SAVE", "").strip()
     if save_path:
         json.dump(agent.rows, open(save_path, "w", encoding="utf-8"), ensure_ascii=False)
@@ -611,19 +620,21 @@ def handle_our_agent(agent, message, memorizing, query_id=None, context_id=None)
     rows = _fold_latest(agent.rows)
     final_rows = []
     if rows:
-        # 检索/重排用「干净问题」：MAB 的 message 夹着 ~200 token 的任务 boilerplate + 一个 example，
-        # 直接拿整段去检索 = 拿噪声检索（向量被 example 里的 "president of Russia"/"Donald Trump" 带偏）。
-        # 照 knowl：_extract_retrieval_query 抠出真问题，作答仍用完整 message（保留任务指令）。
+        # Retrieval/rerank use the "clean question": MAB's message carries ~200 tokens
+        # of task boilerplate plus one example, so retrieving with the whole thing means
+        # retrieving with noise (the vector is pulled off by "president of Russia"/
+        # "Donald Trump" in the example). _extract_retrieval_query extracts the real
+        # question; answering still uses the full message (to keep the task instruction).
         retrieval_query = agent._extract_retrieval_query(message)
         order = _hybrid_retrieve(agent, retrieval_query, rows)
         k = min(agent.retrieve_num, len(order))
         topk = order[:k]
-        # LLM 重排 + 去重 top-K（先按抽取位置升序，LLM 排序并留最新）
+        # LLM rerank + dedup the top-K (sort by extraction position ascending first, then LLM ranks and keeps the latest)
         topk_rows = [rows[i] for i in topk]
         final_rows = _llm_rerank(agent, retrieval_query, topk_rows)
     retrieval_time = time.time() - start
 
-    # 作答：WHALE_YING_ITERATIVE=1 走 Self-Ask 迭代（多跳）；否则一步作答（回退大头 r1 基线）
+    # Answer: WHALE_YING_ITERATIVE=1 uses Self-Ask iteration (multi-hop); otherwise one-step answering
     if os.environ.get("WHALE_YING_ITERATIVE", "").strip() in ("1", "true", "yes") and rows:
         answer, input_len, output_len = _iterative_answer(
             agent, message, retrieval_query, rows, final_rows)
@@ -635,7 +646,7 @@ def handle_our_agent(agent, message, memorizing, query_id=None, context_id=None)
         "output": answer,
         "input_len": input_len,
         "output_len": output_len,
-        # ⑤ memory_construction_time 改成「累计抽取耗时」（记忆构造真正的大头）
+        # memory_construction_time is the cumulative extraction time (the real bulk of memory construction)
         "memory_construction_time": agent._extract_time,
         "query_time_len": query_time,
     }

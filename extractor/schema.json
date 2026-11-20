@@ -1,11 +1,11 @@
 {
-  "contract": "聚合方案（GraphRAG 轻量版）· 契约 v6 · 定稿（v5 + 定稿前 2 条：quote 闸 0.95 / 卡片 抽取位置 落库并复算 event_id） · 定稿附注 R10（task-60：三表 event_id 外键化 + check_0 外键检查）；R11（task-65：两降一留 + 表驱动一致性 check）；R12（task-67：类型枚举加 模型，取代 P210）；R13（task-70，小英称 R12：identities.event_id 改可选——标识与事件多对多，缺省按 chunk+抽取位置+quote 定位；取代 P217①）；R14（facts 独立化：facts/metrics.event_id 改可选——fact/metric 可独立于事件存在，无父事件记 null，锚点 source_chunk_id+抽取位置）",
+  "contract": "Contract v6 · finalized (v5 plus 2 pre-final items: quote gate 0.95 / card 抽取位置 stored and event_id recomputed) · final addendum R10 (three-table event_id as foreign key + check_0 foreign-key check); R11 (two downgrades + one kept + table-driven consistency check); R12 (identity type enum adds 模型); R13 (identities.event_id made optional — identity-to-event is many-to-many, fallback location via chunk + 抽取位置 + quote); R14 (facts decoupled: facts/metrics.event_id made optional — a fact/metric may exist independently of an event, no parent event records null, anchored by source_chunk_id + 抽取位置)",
   "version": "v6",
   "status": "定稿",
   "finalized": true,
-  "finale": "定稿标记（task-59）：本文件即聚合方案最终契约。之后不得再改字段/阈值，只能发「取代 P<n>」的新版本。相对 v5 只补 2 条，见 R8/R9。",
-  "event_id_algorithm": "event_id = sha256((source_chunk_id + ':' + 抽取位置) 的 UTF-8 字节).hexdigest()[:16]（16 位小写十六进制）；抽取位置 = 该事件在 chunk 原文中的起始字符偏移（Python 字符下标，从 0 起）。【R10】该算法只用于「卡片」：卡片必填 抽取位置，check_0 按此式复算并与卡片存的 event_id 逐一比对。三表（metric/identity/fact）的 event_id 是外键，指向卡片 event_id，≠ hash(本表 chunk, 本表偏移)，check_0 对三表只验「存在于 cards」，不复算 hash。",
-  "note": "在 v4 基础上只做字段级修订，四张表/字段名/类型/唯一键落位不变。R1 卡片（主）也带 source_chunk_id + quote（契约「回溯」说的是「每条」）；R2 标识表 类型 加 other，占比进 check_3 同款 5% 监控；R3 time_norm/time_ref 加 ISO8601 pattern（YYYY-MM-DDTHH:MM:SS+08:00），两列同格式；R4 fact 唯一键改 (左值指标名, source_chunk_id, 抽取位置)，避免同事件两值更正自撞；R5 指标名 用规范名（别名走标识表 canonical_id），check 层只给候选清单、人工过审、不自动合；R6 additionalProperties 改 false（暗字段不能绕过 schema，加字段走「取代 P<n>」）；R7 quote 仍非必填，但 check_2 统计「带 quote 的行占比」。",
+  "finale": "Finalization marker: this file is the final contract for the extraction schema. From now on, fields/thresholds must not be changed in place; only a new superseding version may be issued. Relative to v5 it only adds 2 items, see R8/R9.",
+  "event_id_algorithm": "event_id = sha256((source_chunk_id + ':' + 抽取位置) UTF-8 bytes).hexdigest()[:16] (16 lowercase hex digits); 抽取位置 = the starting character offset of the event in the chunk's source text (Python character index, 0-based). [R10] This algorithm applies only to cards: a card must provide 抽取位置, and check_0 recomputes it with this formula and compares it against the stored event_id. For the three tables (metric/identity/fact), event_id is a foreign key pointing to a card's event_id, not hash(this table's chunk, this table's offset); check_0 only verifies presence in cards, without recomputing the hash.",
+  "note": "Field-level revisions only, on top of v4; the four tables' field names, types, and unique keys remain unchanged. R1 the card (primary) also carries source_chunk_id + quote (the contract's 'trace-back' applies to every row); R2 the identity table's 类型 adds other, its share monitored by check_3 at the same 5% threshold; R3 time_norm/time_ref add an ISO8601 pattern (YYYY-MM-DDTHH:MM:SS+08:00), same format for both columns; R4 fact's unique key becomes (左值指标名, source_chunk_id, 抽取位置), avoiding self-collision when one event has two corrected values; R5 指标名 must use the canonical name (aliases go through the identity table's canonical_id), the check layer only outputs a candidate list for manual review, never auto-merges; R6 additionalProperties becomes false (hidden fields must not bypass the schema; new fields go through a new superseding version); R7 quote stays optional, but check_2 reports the share of rows carrying a quote.",
   "value_route": "value|aggregate|relation",
   "revisions": [
     {
@@ -13,14 +13,14 @@
       "scope": [
         "card"
       ],
-      "change": "卡片补 source_chunk_id（进必填）+ quote（选填），与三表同口径，卡片也能回原文"
+      "change": "card adds source_chunk_id (required) + quote (optional), same convention as the three tables, so cards can also trace back to source."
     },
     {
       "id": "R2",
       "scope": [
         "identity"
       ],
-      "change": "类型 enum 加 other（值 文件|版本|仓库|工具|other），other 占比 <= 5%（check_3 同款口径）"
+      "change": "类型 enum adds other (values 文件|版本|仓库|工具|other), other share <= 5% (same convention as check_3)."
     },
     {
       "id": "R3",
@@ -29,35 +29,35 @@
         "metric.time_norm",
         "metric.time_ref"
       ],
-      "change": "加 ISO8601 pattern ^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\+08:00$，两列同格式，check_0 验格式"
+      "change": "add ISO8601 pattern ^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\+08:00$, same format for both columns, check_0 validates the format."
     },
     {
       "id": "R4",
       "scope": [
         "fact"
       ],
-      "change": "unique_key 由 (左值指标名, event_id) 改为 (左值指标名, source_chunk_id, 抽取位置)；fact 增加必填 抽取位置（字符偏移，与 event_id 同源）"
+      "change": "unique_key changes from (左值指标名, event_id) to (左值指标名, source_chunk_id, 抽取位置); fact adds required 抽取位置 (character offset, same source as event_id)."
     },
     {
       "id": "R5",
       "scope": [
         "metric.指标名"
       ],
-      "change": "指标名 必须用规范名；别名只走标识表 canonical_id；check_5 只输出「疑似同指标不同写法」候选清单供人工过审，禁止自动合并"
+      "change": "指标名 must use the canonical name; aliases go only through the identity table's canonical_id; check_5 only outputs a candidate list of suspected same-metric-different-spelling for manual review, auto-merge is forbidden."
     },
     {
       "id": "R6",
       "scope": [
         "all_entities"
       ],
-      "change": "additionalProperties true -> false；要加字段只能发「取代 P<n>」的新版本，不能塞暗字段"
+      "change": "additionalProperties true -> false; new fields can only be added via a new superseding version, not as hidden fields."
     },
     {
       "id": "R7",
       "scope": [
         "check_2"
       ],
-      "change": "quote 非必填不变，但 check_2 统计并输出「带 quote 的行占比」（可按 --min-quote-ratio 卡阈值）"
+      "change": "quote stays optional, but check_2 reports the share of rows carrying a quote (threshold configurable via --min-quote-ratio)."
     },
     {
       "id": "R8",
@@ -65,7 +65,7 @@
         "gates.quote_ratio_min",
         "check_2"
       ],
-      "change": "quote_ratio_min 由 0.0 定死 0.95（闸默认打开）；check_2 默认阈值改为读 schema 的 0.95，并输出「缺 quote 的行清单」（表名#行号 + 能定位的 event_id/chunk），低于 0.95 即不过"
+      "change": "quote_ratio_min fixed at 0.95 (was 0.0), gate enabled by default; check_2's default threshold now reads 0.95 from the schema and outputs a list of rows missing quote (table#row + locatable event_id/chunk); below 0.95 it fails."
     },
     {
       "id": "R9",
@@ -74,7 +74,7 @@
         "card.event_id",
         "check_0"
       ],
-      "change": "卡片 required/properties 加 抽取位置（integer, minimum 0）与三表同源；check_0 新增「复算 event_id」：用 hash(chunk_id, 抽取位置) 重算并与卡片 event_id 比对，不一致 = 不过"
+      "change": "card required/properties add 抽取位置 (integer, minimum 0), same source as the three tables; check_0 adds 'recompute event_id': recompute with hash(chunk_id, 抽取位置) and compare against the card's event_id; mismatch = fail."
     },
     {
       "id": "R10",
@@ -87,7 +87,7 @@
         "fact.抽取位置",
         "check_0"
       ],
-      "change": "纯描述 + 一条外键检查：三表 event_id 标为「外键，指向卡片 event_id；≠ hash(本表 chunk, 本表偏移)」；三表 抽取位置 标为「本行在原文中的偏移，与卡片事件偏移不同源」；check_0 新增外键检查：三表每行 event_id 必须存在于 cards，缺失即不过（跨表 join 从判据变闸）。字段/类型/唯一键/阈值均不动。"
+      "change": "Description only + one foreign-key check: the three tables' event_id is marked as a foreign key pointing to a card's event_id (not hash(this table's chunk, this table's offset)); the three tables' 抽取位置 is marked as this row's offset in the source text (a different source from the card event offset); check_0 adds a foreign-key check: each row's event_id in the three tables must exist in cards, missing = fail (cross-table join goes from a judgment to a gate). Fields/types/unique keys/thresholds unchanged."
     },
     {
       "id": "R11",
@@ -99,38 +99,38 @@
         "card.required",
         "quote.required"
       ],
-      "change": "两降一留：单位（metric）与 target（card）去 required -> on_missing=warn（C 档，很多指标本无单位 / target 缺失不影响判分）；canonical_id 留 required -> on_missing=fill（A 档 derived：程序按「完整原文写法」规范化生成，模型不给）；quote.归一化 维持可选（quote.required 只留 原文）。同时把 A/B/C 三档从代码清单改为表驱动（extract_rules.json：fill / on_missing 两属性 + 机器可查一致性规则）。字段/类型/唯一键/阈值均不动，不填默认值（「不知道」不能伪装成「个」）。"
+      "change": "Two downgrades + one kept: 单位 (metric) and target (card) drop required -> on_missing=warn (grade C, many metrics have no unit / missing target does not affect scoring); canonical_id keeps required -> on_missing=fill (grade A derived: the program generates it by normalizing 完整原文写法, the model does not supply it); quote.归一化 stays optional (quote.required keeps only 原文). Also, grades A/B/C move from a code list to table-driven (extract_rules.json: fill / on_missing attributes + machine-checkable consistency rules). Fields/types/unique keys/thresholds unchanged, and no default value is filled in (an unknown value must not be disguised as a real unit)."
     },
     {
       "id": "R12",
       "scope": [
         "identity.类型"
       ],
-      "change": "取代 P210：identity.类型 enum 加「模型」（值 文件|版本|仓库|工具|模型|other）。扩枚举 = 扩闸覆盖（枚举值闸读的是这个 enum，检查逻辑不动）：LLM 把「模型」当标识名时能被 enum_value_as_identity 吃到。schema 与 extract_rules.json 同步。"
+      "change": "identity.类型 enum adds 模型 (values 文件|版本|仓库|工具|模型|other). Expanding the enum expands gate coverage (the enum-value gate reads this enum; check logic unchanged): when the LLM treats '模型' as an identity name, enum_value_as_identity can catch it. schema and extract_rules.json are kept in sync."
     },
     {
       "id": "R13",
-      "alias": "task-70 R12（小英编号）",
+      "alias": "R12",
       "scope": [
         "identity.event_id",
         "identity.required"
       ],
-      "change": "取代 P217①：identities.event_id 由必填改**可选**（从 identity.required 去掉）。理由：v6 的「三表 event_id 外键」对标识表过强——标识与事件是多对多（名称提及），不是一对多。缺省定位用 source_chunk_id + 抽取位置 + quote；extract_rules.json 里该字段 on_missing=fill + nullable=true，程序按 mention 处理、不硬造外键。metrics/facts 的 event_id 外键不变（它们是一对多，explicit/contain 关联；无单一源事件的派生量记 aggregate 并指向该 chunk 汇总段）。字段/类型/唯一键/阈值均不动。"
+      "change": "identities.event_id changes from required to optional (removed from identity.required). Rationale: v6's three-table event_id foreign key is too strong for the identity table — identity-to-event is many-to-many (name mentions), not one-to-many. Default location uses source_chunk_id + 抽取位置 + quote; in extract_rules.json this field is on_missing=fill + nullable=true, and the program handles it as a mention without fabricating a foreign key. metrics/facts event_id foreign keys stay unchanged (they are one-to-many, explicit/contain associations; a derived quantity with no single source event records aggregate and points to that chunk's summary segment). Fields/types/unique keys/thresholds unchanged."
     },
     {
       "id": "R14",
-      "alias": "task-101 P331",
+      "alias": "",
       "scope": [
         "card.time_raw",
         "card.time_norm",
         "metric.time_raw",
         "metric.time_norm"
       ],
-      "change": "时间列 nullable=true（取代 R3 的必填口径）：没时间信息 = 字段显式 null（键仍在），不拒整片；time_norm 只能由 time_raw 经规则推出，推不出 = null，不许保留模型自报的精确值（静默造假）。字段/类型/唯一键/阈值不动；required 列表不变（null 是合法的「有值」）。op_type 枚举不变；英文动作词走程序别名表（extract_rules.json 的 alias=op_type），不扩枚举。"
+      "change": "Time columns nullable=true (superseding R3's required convention): no time info = field explicitly null (key still present), do not reject the whole record; time_norm can only be derived from time_raw by rules, and if it cannot be derived = null, never keep the model's self-reported precise value (silent fabrication). Fields/types/unique keys/thresholds unchanged; required list unchanged (null is a valid 'value'). op_type enum unchanged; English action words go through the program's alias table (extract_rules.json alias=op_type), enum not expanded."
     },
     {
       "id": "R15",
-      "alias": "task-102 P332/P333",
+      "alias": "",
       "scope": [
         "card.base_source",
         "card.base_granularity",
@@ -140,13 +140,13 @@
         "metric.time_uncertain",
         "metric.time_ref"
       ],
-      "change": "相对时间的基准显式化（取代「隐式以 chunk.time_ref 为基准」）：每行记 base_source（turn_time/session_time/time_ref 三选一，三级取最细）+ base_granularity（turn/session/chunk）；time_uncertain=true 表示有 time_raw 但推不出 time_norm（含三级基准都缺），不编值。metric.time_ref 改 nullable（三级基准都没有时与 time_norm 同口径为 null，不拒整片）。字段/类型/唯一键/阈值不动，required 列表不变。"
+      "change": "Relative-time base made explicit (superseding the implicit 'chunk.time_ref as base'): each row records base_source (turn_time/session_time/time_ref, choose the finest of the three levels) + base_granularity (turn/session/chunk); time_uncertain=true means time_raw exists but time_norm cannot be derived (including when all three base levels are missing), so no value is invented. metric.time_ref becomes nullable (when all three base levels are missing it is null, same convention as time_norm, do not reject the whole record). Fields/types/unique keys/thresholds unchanged, required list unchanged."
     },
     {
-      "R16": "task-103：加 time_precision（day/minute/second）——day 精度 time_norm 只到日期，不存 BASE 时刻（P340 静默错）；时区 aware（RETURN_AS_TIMEZONE_AWARE + TIMEZONE，time_norm 带 +08:00 由 aware datetime 换算而来，不是拼字符串）。"
+      "R16": "Add time_precision (day/minute/second) — day precision time_norm stops at the date, never storing a BASE timestamp (silent error); timezone aware (RETURN_AS_TIMEZONE_AWARE + TIMEZONE, time_norm carries +08:00 derived from an aware datetime, not string concatenation)."
     },
     {
-      "R16": "task-103：加 time_precision（day/minute/second）——day 精度 time_norm 只到日期，不存 BASE 时刻（P340 静默错）；时区 aware（RETURN_AS_TIMEZONE_AWARE + TIMEZONE，time_norm 带 +08:00 由 aware datetime 换算而来，不是拼字符串）。"
+      "R16": "Add time_precision (day/minute/second) — day precision time_norm stops at the date, never storing a BASE timestamp (silent error); timezone aware (RETURN_AS_TIMEZONE_AWARE + TIMEZONE, time_norm carries +08:00 derived from an aware datetime, not string concatenation)."
     }
   ],
   "entities": {
@@ -171,35 +171,35 @@
         "event_id": {
           "type": "string",
           "minLength": 1,
-          "description": "主键，= hash(chunk_id, 事件起始字符偏移)；具体算法见顶层 event_id_algorithm（R9），check_0 会复算"
+          "description": "Primary key, = hash(chunk_id, event start character offset); see top-level event_id_algorithm for the algorithm (R9), check_0 recomputes it."
         },
         "agent": {
           "type": "string",
           "minLength": 1,
-          "description": "谁"
+          "description": "who"
         },
         "action": {
           "type": "string",
           "minLength": 1,
-          "description": "做了什么"
+          "description": "what was done"
         },
         "target": {
           "type": "string",
           "minLength": 1,
-          "description": "对谁/什么"
+          "description": "on whom/what"
         },
         "time_raw": {
           "type": "string",
           "minLength": 1,
           "nullable": true,
-          "description": "原文时间写法【task-101】没时间信息 = null（不拒整片）；有值必须能在原文里原样找到（纯剪贴）"
+          "description": "Original time text. No time info = null (do not reject the whole record); a value must be findable verbatim in the source (pure copy)."
         },
         "time_norm": {
           "type": "string",
           "minLength": 1,
           "nullable": true,
           "pattern": "^(\\d{4}-\\d{2}-\\d{2}|\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\+08:00)$",
-          "description": "时间归一：task-103 起按原文精度落——day 精度只到日期（YYYY-MM-DD，**不含时刻**，不许把 BASE 的时刻当记录时刻）；minute/second 落 YYYY-MM-DDTHH:MM:SS+08:00（时区 aware）。推不出 -> null（task-101：time_norm 只能由 time_raw 推）。"
+          "description": "Normalized time: use the source's precision — day precision stops at the date (YYYY-MM-DD, no time-of-day, never use the BASE timestamp as the recorded time); minute/second use YYYY-MM-DDTHH:MM:SS+08:00 (timezone aware). Cannot derive -> null (time_norm can only be derived from time_raw)."
         },
         "time_precision": {
           "type": "string",
@@ -210,12 +210,12 @@
             "unknown"
           ],
           "nullable": true,
-          "description": "（task-103 R16）原文的时间精度：day=只有日期/相对日词（昨天、last week、2026-03-14），此时 time_norm 只到日期、不存时刻；minute=有 时:分；second=有秒。null=没有 time_raw（不知道，不是「只知道到日」）。判据：time_precision=day 时，回答「几点」必须答「不知道几点」，不许拿 BASE 的时刻充数。（task-107 五）unknown = 有 time_raw 但推不出 time_norm（口语模糊：around 19:54 / a quarter past eight / a few minutes later 这类 dateparser 真解不了的写法）——null 是「没有 time_raw」，unknown 是「有写法但解不出」，两者不许混。"
+          "description": "Source time precision: day = date only or a relative day word (yesterday, last week, 2026-03-14), in which case time_norm stops at the date and stores no time-of-day; minute = has hour:minute; second = has seconds. null = no time_raw (unknown, not 'known to the day only'). Rule: when time_precision=day, answering 'what time' must say 'unknown time', never using the BASE timestamp to fill in. unknown = time_raw exists but time_norm cannot be derived (colloquial ambiguity: around 19:54 / a quarter past eight / a few minutes later — forms dateparser genuinely cannot resolve) — null is 'no time_raw', unknown is 'has a form but cannot resolve it'; the two must not be conflated."
         },
         "base_source": {
           "type": "string",
           "minLength": 1,
-          "description": "【task-102 R15】相对时间绝对化用的基准字段（turn_time / session_time / time_ref，三级取最细）；程序填；三级都拿不到就不写这个键（绝不 now()）"
+          "description": "Base field used to absolutize relative time (turn_time / session_time / time_ref, finest of the three levels); program-filled; if none of the three is available, do not write this key (never now())."
         },
         "base_granularity": {
           "type": "string",
@@ -224,16 +224,16 @@
             "session",
             "chunk"
           ],
-          "description": "【task-102 R15】基准粒度：turn / session / chunk，与 base_source 同源（程序填）；拿不到则无此键"
+          "description": "Base granularity: turn / session / chunk, same source as base_source (program-filled); if unavailable, no such key."
         },
         "time_uncertain": {
           "type": "boolean",
-          "description": "【task-102 R15】true = 有 time_raw 但推不出 time_norm（含三级基准都缺）；false = 正常。不确定只说不确定，不编值"
+          "description": "true = time_raw exists but time_norm cannot be derived (including all three base levels missing); false = normal. Uncertainty is stated as uncertainty, no value invented."
         },
         "result": {
           "type": "string",
           "minLength": 1,
-          "description": "结果/因果"
+          "description": "result / cause-effect"
         },
         "op_type": {
           "type": "string",
@@ -248,12 +248,12 @@
         "source_chunk_id": {
           "type": "string",
           "minLength": 1,
-          "description": "通用字段：卡片也带，才能回原文（R1）"
+          "description": "Common field: cards carry it too, so they can trace back to source (R1)."
         },
         "抽取位置": {
           "type": "integer",
           "minimum": 0,
-          "description": "R9：该事件在 chunk 原文中的起始字符偏移（与三表同源，不是序号）；check_0 用 hash(source_chunk_id, 抽取位置) 复算 event_id"
+          "description": "Starting character offset of this event in the chunk's source text (same source as the three tables, not a sequence number); check_0 recomputes event_id with hash(source_chunk_id, 抽取位置)."
         },
         "quote": {
           "type": "object",
@@ -271,7 +271,7 @@
             }
           },
           "additionalProperties": false,
-          "description": "选填；check_2 统计带 quote 的行占比（R1/R7）"
+          "description": "Optional; check_2 reports the share of rows carrying a quote (R1/R7)."
         }
       },
       "additionalProperties": false
@@ -297,11 +297,11 @@
         "指标名": {
           "type": "string",
           "minLength": 1,
-          "description": "必须用规范名（R5）；别名写进标识表，用 canonical_id 指向规范名，不在此列旁写"
+          "description": "Must use the canonical name (R5); aliases go into the identity table with canonical_id pointing to the canonical name, not written beside this column."
         },
         "值": {
           "type": "number",
-          "description": "数值型"
+          "description": "numeric"
         },
         "单位": {
           "type": "string",
@@ -311,14 +311,14 @@
           "type": "string",
           "minLength": 1,
           "nullable": true,
-          "description": "原文时间写法【task-101】没时间信息 = null（不拒整片）；有值必须能在原文里原样找到（纯剪贴）"
+          "description": "Original time text. No time info = null (do not reject the whole record); a value must be findable verbatim in the source (pure copy)."
         },
         "time_norm": {
           "type": "string",
           "minLength": 1,
           "nullable": true,
           "pattern": "^(\\d{4}-\\d{2}-\\d{2}|\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\+08:00)$",
-          "description": "时间归一：task-103 起按原文精度落——day 精度只到日期（YYYY-MM-DD，**不含时刻**，不许把 BASE 的时刻当记录时刻）；minute/second 落 YYYY-MM-DDTHH:MM:SS+08:00（时区 aware）。推不出 -> null（task-101：time_norm 只能由 time_raw 推）。"
+          "description": "Normalized time: use the source's precision — day precision stops at the date (YYYY-MM-DD, no time-of-day, never use the BASE timestamp as the recorded time); minute/second use YYYY-MM-DDTHH:MM:SS+08:00 (timezone aware). Cannot derive -> null (time_norm can only be derived from time_raw)."
         },
         "time_precision": {
           "type": "string",
@@ -329,12 +329,12 @@
             "unknown"
           ],
           "nullable": true,
-          "description": "（task-103 R16）原文的时间精度：day=只有日期/相对日词（昨天、last week、2026-03-14），此时 time_norm 只到日期、不存时刻；minute=有 时:分；second=有秒。null=没有 time_raw（不知道，不是「只知道到日」）。判据：time_precision=day 时，回答「几点」必须答「不知道几点」，不许拿 BASE 的时刻充数。（task-107 五）unknown = 有 time_raw 但推不出 time_norm（口语模糊：around 19:54 / a quarter past eight / a few minutes later 这类 dateparser 真解不了的写法）——null 是「没有 time_raw」，unknown 是「有写法但解不出」，两者不许混。"
+          "description": "Source time precision: day = date only or a relative day word (yesterday, last week, 2026-03-14), in which case time_norm stops at the date and stores no time-of-day; minute = has hour:minute; second = has seconds. null = no time_raw (unknown, not 'known to the day only'). Rule: when time_precision=day, answering 'what time' must say 'unknown time', never using the BASE timestamp to fill in. unknown = time_raw exists but time_norm cannot be derived (colloquial ambiguity: around 19:54 / a quarter past eight / a few minutes later — forms dateparser genuinely cannot resolve) — null is 'no time_raw', unknown is 'has a form but cannot resolve it'; the two must not be conflated."
         },
         "base_source": {
           "type": "string",
           "minLength": 1,
-          "description": "【task-102 R15】相对时间绝对化用的基准字段（turn_time / session_time / time_ref，三级取最细）；程序填；三级都拿不到就不写这个键（绝不 now()）"
+          "description": "Base field used to absolutize relative time (turn_time / session_time / time_ref, finest of the three levels); program-filled; if none of the three is available, do not write this key (never now())."
         },
         "base_granularity": {
           "type": "string",
@@ -343,17 +343,17 @@
             "session",
             "chunk"
           ],
-          "description": "【task-102 R15】基准粒度：turn / session / chunk，与 base_source 同源（程序填）；拿不到则无此键"
+          "description": "Base granularity: turn / session / chunk, same source as base_source (program-filled); if unavailable, no such key."
         },
         "time_uncertain": {
           "type": "boolean",
-          "description": "【task-102 R15】true = 有 time_raw 但推不出 time_norm（含三级基准都缺）；false = 正常。不确定只说不确定，不编值"
+          "description": "true = time_raw exists but time_norm cannot be derived (including all three base levels missing); false = normal. Uncertainty is stated as uncertainty, no value invented."
         },
         "time_ref": {
           "type": "string",
           "minLength": 1,
           "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\+08:00$",
-          "description": "参照点 = 该 chunk 事件时间（task-102 起取最细基准 turn>session>chunk）；三级基准都拿不到时可为 null（与 time_norm 同口径，不拒整片）【task-102 R15 起 nullable】",
+          "description": "Reference point = this chunk's event time (use the finest base turn>session>chunk); when all three base levels are unavailable it may be null (same convention as time_norm, do not reject the whole record).",
           "nullable": true
         },
         "source_chunk_id": {
@@ -363,12 +363,12 @@
         "event_id": {
           "type": "string",
           "minLength": 1,
-          "description": "【R10 外键】指向卡片 event_id（必须存在于 cards），不是本表 hash(chunk, 偏移) 的结果；check_0 只验外键存在性，不复算 hash（三表 抽取位置 与卡片事件偏移不同源）"
+          "description": "Foreign key pointing to a card's event_id (must exist in cards), not the result of hash(this table's chunk, offset); check_0 only verifies foreign-key existence, without recomputing the hash (the three tables' 抽取位置 has a different source from the card event offset)."
         },
         "抽取位置": {
           "type": "integer",
           "minimum": 0,
-          "description": "【R10】本行在原文中的偏移（与卡片事件偏移不同源，不能代入卡片 event_id 公式）"
+          "description": "This row's offset in the source text (a different source from the card event offset; must not be substituted into the card event_id formula)."
         },
         "quote": {
           "type": "object",
@@ -425,18 +425,18 @@
             "模型",
             "其他"
           ],
-          "description": "R2：加 other，占比进 check_3 5% 监控；R12（task-67，取代 P210）：加 模型（LLM 把「模型」当标识名时枚举值闸要能吃到）"
+          "description": "R2: adds other, its share monitored by check_3 at 5%; R12: adds 模型 (so the enum-value gate can catch it when the LLM treats '模型' as an identity name)."
         },
         "canonical_id": {
           "type": "string",
           "minLength": 1,
-          "description": "（task-107 一）canonical_id **只在别名表（extract_rules.json 的 _identity_alias）里登记过才算数**；查不到 => null + unresolved=true，**不许把原文原样当 canonical_id**（把猜测当事实，之后永远查不到但看起来正常）。",
+          "description": "canonical_id is only valid if registered in the alias table (extract_rules.json's _identity_alias); not found => null + unresolved=true; never store the raw text as canonical_id (treating a guess as fact would look normal but never resolve).",
           "nullable": true
         },
         "event_id": {
           "type": "string",
           "minLength": 1,
-          "description": "【R10 外键 / R13（task-70，小英称 R12）可选】指向卡片 event_id（存在就必须在 cards 里，check_0 验存在性、不复算 hash）。标识与事件是多对多（名称提及），所以本字段**可选**：缺省用 source_chunk_id + 抽取位置 + quote 定位，程序按 mention 处理、不硬造外键；cross-table join 只认 explicit/contain 的行"
+          "description": "Foreign key / optional: points to a card's event_id (if present it must be in cards; check_0 verifies existence without recomputing the hash). Identity-to-event is many-to-many (name mentions), so this field is optional: fallback location uses source_chunk_id + 抽取位置 + quote, and the program handles it as a mention without fabricating a foreign key; cross-table join only considers explicit/contain rows."
         },
         "source_chunk_id": {
           "type": "string",
@@ -445,7 +445,7 @@
         "抽取位置": {
           "type": "integer",
           "minimum": 0,
-          "description": "【R10】本行在原文中的偏移（与卡片事件偏移不同源，不能代入卡片 event_id 公式）"
+          "description": "This row's offset in the source text (a different source from the card event offset; must not be substituted into the card event_id formula)."
         },
         "quote": {
           "type": "object",
@@ -466,7 +466,7 @@
         },
         "unresolved": {
           "type": "boolean",
-          "description": "（task-107 一）true = 这个标识的写法在别名表里查不到，canonical_id 为 null；false = 已登记（或有规范 id）。派生值，模型不写。【P347 补】下游检索/聚合遇到 unresolved 行**不许静默跳过**：单独计数 unresolved_rows（判据：带 1 条未登记名称跑聚合 => unresolved_rows=1），答案涉及被跳过行时说「另有 N 条名称未识别」。"
+          "description": "true = this identity's spelling is not found in the alias table, canonical_id is null; false = registered (or has a canonical id). Derived value, the model does not write it. Downstream search/aggregation must not silently skip unresolved rows: count unresolved_rows separately (rule: running aggregation with 1 unregistered name => unresolved_rows=1), and when the answer involves skipped rows say 'another N names unrecognized'."
         }
       },
       "additionalProperties": false
@@ -489,27 +489,27 @@
         "左值指标名": {
           "type": "string",
           "minLength": 1,
-          "description": "断言主语（规范写法；同一事实的两个版本必须用同一主语，如 Finland national sport）"
+          "description": "Assertion subject (canonical spelling; two versions of the same fact must use the same subject, e.g. Finland national sport)."
         },
         "等式": {
           "type": "string",
           "minLength": 1,
-          "description": "断言或等式内容（X is Y / X = Y 都算），一句一个"
+          "description": "Assertion or equation content (X is Y / X = Y both count), one per statement."
         },
         "event_id": {
           "type": "string",
           "minLength": 1,
-          "description": "【R10 外键】指向卡片 event_id（必须存在于 cards），不是本表 hash(chunk, 偏移) 的结果；check_0 只验外键存在性，不复算 hash（三表 抽取位置 与卡片事件偏移不同源）"
+          "description": "Foreign key pointing to a card's event_id (must exist in cards), not the result of hash(this table's chunk, offset); check_0 only verifies foreign-key existence, without recomputing the hash (the three tables' 抽取位置 has a different source from the card event offset)."
         },
         "source_chunk_id": {
           "type": "string",
           "minLength": 1,
-          "description": "通用字段"
+          "description": "Common field."
         },
         "抽取位置": {
           "type": "integer",
           "minimum": 0,
-          "description": "【R10】本行在原文中的偏移（与卡片事件偏移不同源，不能代入卡片 event_id 公式）"
+          "description": "This row's offset in the source text (a different source from the card event offset; must not be substituted into the card event_id formula)."
         },
         "quote": {
           "type": "object",
@@ -548,5 +548,5 @@
     "router_max_fallback_rate": 0.35,
     "router_case_count": 20
   },
-  "finale_r10": "定稿附注 R10（task-60）：在 v6 定稿之上仅补语义描述与外键检查，字段/类型/唯一键/阈值不变。① 三表 event_id 是外键（指向卡片），不是本表 hash；② 三表 抽取位置 是行偏移，与卡片事件偏移不同源；③ check_0 校验三表 event_id 必须存在于 cards。"
+  "finale_r10": "Final addendum R10: on top of the v6 final, only adds semantic descriptions and a foreign-key check; fields/types/unique keys/thresholds unchanged. ① The three tables' event_id is a foreign key (pointing to a card), not this table's hash; ② The three tables' 抽取位置 is a row offset, a different source from the card event offset; ③ check_0 verifies the three tables' event_id must exist in cards."
 }

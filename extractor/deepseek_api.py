@@ -1,26 +1,29 @@
 # -*- coding: utf-8 -*-
-"""deepseek_api: LLM 调用适配器（task-61 新建，交付于 runs/61/）。
+"""deepseek_api: a minimal LLM call adapter.
 
-背景：任务书说「调 deepseek_api.call（你 task-56 用过）」，但本工作区没有该模块，
-python 环境里也 import 不到（ModuleNotFoundError），task-56 实际是联网调研、从未调过 LLM。
-为了让 extract.py 的调用面固定成 `deepseek_api.call(prompt)`，这里补一个最小实现。
+The extractor needs a stable `deepseek_api.call(prompt)` interface, but no such module
+existed in this workspace and it could not be imported (ModuleNotFoundError). This file
+provides a small, self-contained implementation so `extract.py` can depend on one fixed
+calling surface.
 
-配置（全部走环境变量，不落盘、不写死 key）：
-  DEEPSEEK_API_PROVIDER  deepseek（默认）| ollama
-  DEEPSEEK_API_BASE      默认 https://api.deepseek.com ；ollama 默认 http://127.0.0.1:11434/v1
-  DEEPSEEK_API_KEY       必填（provider=deepseek）；provider=ollama 可空
-  DEEPSEEK_MODEL         默认 deepseek-flash ；ollama 默认 qwen2.5-coder:7b
+Configuration (all via environment variables; no secrets are hard-coded or written to disk):
+  DEEPSEEK_API_PROVIDER  deepseek (default) | ollama
+  DEEPSEEK_API_BASE      default https://api.deepseek.com ; ollama default http://127.0.0.1:11434/v1
+  DEEPSEEK_API_KEY       required (provider=deepseek); optional for provider=ollama
+  DEEPSEEK_MODEL         default deepseek-flash ; ollama default qwen2.5-coder:7b
 
-对外：
+Public interface:
   call(prompt, **kw) -> dict{"text","model","endpoint","usage","elapsed_ms","finish_reason"}
   probe() -> dict{"configured","reason","provider","base","model","reachable",...}
   DeepSeekAPIUnavailable / DeepSeekAPITruncated
 
-task-63 ③：finish_reason == "length" 时直接抛 DeepSeekAPITruncated（截断与「模型乱写」
-必须分开报；等 JSON 解析失败再报会把两种病因混成一个）。
+When finish_reason == "length", raise DeepSeekAPITruncated directly: truncation and
+"the model wrote garbage" must be reported separately, otherwise waiting for JSON
+parsing to fail would conflate the two distinct causes.
 
-未配置/连不上时抛 DeepSeekAPIUnavailable，错误信息里直说缺哪个环境变量，
-不伪造响应、不静默降级成假数据。
+When unconfigured or unreachable, raise DeepSeekAPIUnavailable; the error message
+states exactly which environment variable is missing. Never fabricate a response
+or silently degrade into fake data.
 """
 import json
 import os
@@ -38,11 +41,11 @@ MODEL_ENV = "DEEPSEEK_MODEL"
 
 
 class DeepSeekAPIUnavailable(RuntimeError):
-    """调用面不可用：缺配置 / 连不上 / 返回非 200。消息可直接给人看。"""
+    """Call surface unavailable: missing config / unreachable / non-200 response. The message is safe to show to a user directly."""
 
 
 class DeepSeekAPITruncated(DeepSeekAPIUnavailable):
-    """输出被 max_tokens 截断（finish_reason == "length"）。必须与「模型乱写 JSON」分开。"""
+    """Output truncated by max_tokens (finish_reason == "length"). Must be distinguished from "model wrote malformed JSON"."""
 
 
 def load_config():
@@ -69,13 +72,16 @@ def _post_json(url, payload, headers, timeout):
 
 def call(prompt, model=None, temperature=0.0, max_tokens=None, timeout=600,
          response_format_json=True, repair=None, disable_thinking=False):
-    """发一次 chat/completions 请求，返回 {"text": 助手回复原文, ...}。
+    """Send one chat/completions request and return {"text": <assistant reply verbatim>, ...}.
 
-    prompt 为单条 user 消息；要用 system 提示请自己拼进 prompt（保持调用面最小）。
+    `prompt` is a single user message; prepend any system instruction into `prompt`
+    yourself (to keep the calling surface minimal).
 
-    repair：task-64 B 档重试用（extract.py 调用）。形如 {"reason": "<该片被拒原因>",
-    "attempt": 2}；给了就追加一条 user 消息把「上一次输出为什么被拒」告诉模型，
-    比原样重发同一 prompt 更容易跳出同一个错——重试靠的是这条反馈，不是碰运气。
+    `repair` is used by extract.py for a second-chance retry. Its shape is
+    {"reason": "<why the previous output was rejected>", "attempt": 2}; when given,
+    an extra user message tells the model why the previous output was rejected, which
+    helps it escape the same mistake more reliably than simply resending the identical
+    prompt — the retry works because of this feedback, not by luck.
     """
     cfg = load_config()
     if not cfg["configured"]:
@@ -108,19 +114,19 @@ def call(prompt, model=None, temperature=0.0, max_tokens=None, timeout=600,
         headers["Authorization"] = "Bearer " + cfg["key"]
     url = cfg["base"] + "/chat/completions"
     t0 = time.time()
-    # 网络抖动重试：连接失败/读超时最多重试 3 次（手机热点/USB 共享常见瞬态失败）
+    # Retry on transient network errors: up to 3 attempts for connect failures / read timeouts.
     for attempt in range(3):
         try:
             status, text = _post_json(url, payload, headers, timeout)
             break
-        except urllib.error.HTTPError as exc:  # 4xx/5xx 也把响应体带出来，不重试
+        except urllib.error.HTTPError as exc:  # 4xx/5xx: surface the response body, no retry
             detail = ""
             try:
                 detail = exc.read().decode("utf-8", "replace")[:300]
             except Exception:  # noqa: BLE001
                 pass
             raise DeepSeekAPIUnavailable("HTTP %s from %s: %s" % (exc.code, url, detail)) from exc
-        except Exception as exc:  # noqa: BLE001 连接失败/超时/DNS
+        except Exception as exc:  # noqa: BLE001 connect failure / timeout / DNS
             if attempt < 2:
                 print("deepseek_api retry %d/3 after %s: %s"
                       % (attempt + 1, type(exc).__name__, str(exc)[:120]), file=sys.stderr)
@@ -156,7 +162,7 @@ def call(prompt, model=None, temperature=0.0, max_tokens=None, timeout=600,
 
 
 def probe(timeout=5):
-    """只探活，不抛异常：给留痕/自测记录「当前能不能真调」。"""
+    """Probe liveness without raising: record whether a real call would work right now."""
     cfg = load_config()
     out = {"configured": cfg["configured"], "reason": cfg["reason"],
            "provider": cfg["provider"], "base": cfg["base"], "model": cfg["model"],
