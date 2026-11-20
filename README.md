@@ -6,6 +6,7 @@
 
 **Extract facts. Resolve updates. Retrieve evidence. Answer across long histories.**
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24402955.svg)](https://doi.org/10.5281/zenodo.24402955)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10%2B-3776AB.svg?logo=python&logoColor=white)](#quick-start)
 [![Built with DeepSeek](https://img.shields.io/badge/built%20with-DeepSeek-4D6BFE.svg)](https://platform.deepseek.com/)
