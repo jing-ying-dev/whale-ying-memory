@@ -69,20 +69,20 @@ To enable iterative multi-hop answering, set:
 export WHALE_YING_ITERATIVE=1
 ```
 
-Iterative answering is off by default. The workflow is **extract → fold superseded values → retrieve → answer**. See `抽取器/extract.py` for the extraction flow and `methods/whale_ying.py` for retrieval, folding, and answering.
+Iterative answering is off by default. The workflow is **extract → fold superseded values → retrieve → answer**. See `extractor/extract.py` for the extraction flow and `memory/whale_ying.py` for retrieval, folding, and answering.
 
 Extraction sends source text to the configured LLM API. Review your provider’s data handling before processing sensitive material.
 
 ## Project structure
 
 ```text
-抽取器/
+extractor/
 ├── extract.py          # Extraction flow
 ├── deepseek_api.py     # LLM adapter
 ├── schema.json         # Four-table schema
 └── extract_rules.json  # Validation rules
 
-methods/
+memory/
 └── whale_ying.py       # Retrieval, folding, and multi-hop answering
 ```
 
