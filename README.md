@@ -15,11 +15,11 @@ The following results are for the current system: four-table extraction, tempora
 | Single-hop, 262k, substring scoring | **93.2%** (gpt-4o-mini answer model; mean of 5 runs) | GPT-4o: 60%; BM25: 56%; gpt-4o-mini: 45% |
 | Single-hop, 262k, substring scoring | **93.0%** (DeepSeek answer model, thinking disabled; single run) | — |
 | Single-hop, 262k, substring scoring | **92.0%** (local Qwen2.5-Coder 7B answer model; single run) | — |
-| Single-hop, 6k | **98%** | — |
-| Multi-hop, 262k, substring scoring | **48.3%** (DeepSeek answer model; mean of 3 runs) | Paper’s multi-hop baselines: ≤6% |
+| Single-hop, 6k, substring scoring | **98%** (DeepSeek answer model, thinking disabled; single run) | — |
+| Multi-hop, 262k, substring scoring | **48.3%** (DeepSeek answer model, thinking disabled; mean of 3 runs) | Paper’s multi-hop baselines: ≤6% |
 | Multi-hop, 262k | **25.3%** (gpt-4o-mini answer model; mean of 3 runs) | — |
 | Multi-hop, 262k, direct full-context reading | — | DeepSeek without the memory system: 5.3% |
-| Multi-hop, 6k | **65%** | — |
+| Multi-hop, 6k, substring scoring | **66%** (65% exact; DeepSeek answer model, thinking disabled; single run) | — |
 | Full Chinese LoCoMo | **98.9%** pass rate across 272 sessions | — |
 
 For the reported 262k comparisons, single-hop performance rose from 64% direct to 93.2% with memory; multi-hop rose from 5.3% direct to 48.3% with memory. Single-hop accuracy is stable across answer models — gpt-4o-mini (93.2%), DeepSeek with thinking disabled (93.0%), and a local Qwen2.5-Coder 7B (92.0%) all land in the same band. These are benchmark results under the stated configurations, not a guarantee of performance on other workloads.
