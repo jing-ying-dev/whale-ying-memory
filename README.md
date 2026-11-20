@@ -152,6 +152,15 @@ python -m pip install -r requirements.txt
 
 Python 3.10+ is required. Extraction can use the DeepSeek API or a local Ollama-compatible endpoint.
 
+To install the `whaleying` CLI (optional), use an editable install so the CLI can locate the extractor and memory modules from the source tree:
+
+```bash
+python -m pip install -e .
+whaleying --help
+```
+
+Note: an editable install is supported; a non-editable wheel build would need the `memory/` and `extractor/` directories packaged as well, which is not done yet.
+
 ### 2. Configure an extraction model
 
 DeepSeek:

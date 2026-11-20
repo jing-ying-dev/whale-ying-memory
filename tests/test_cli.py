@@ -30,6 +30,31 @@ class TestQuickStartDryRun(unittest.TestCase):
         self.assertEqual(summary["chunk_chars"], 167)
 
 
+class TestOfflineReplay(unittest.TestCase):
+    """Run the full extraction pipeline offline via --replay (no model call).
+
+    The replay fixture is a minimal, valid model response for the shipped sample
+    chunk: one card whose quote is a substring of the source. This exercises
+    validate -> quote substring gate -> traceability -> e2e, the same path a real
+    extraction takes, without any API key or network.
+    """
+
+    def test_replay_extraction_exits_zero_and_produces_one_card(self):
+        out = REPO_ROOT / "out" / "replay_entities.json"
+        logdir = REPO_ROOT / "out" / "replay_log"
+        proc = subprocess.run(
+            [PY, str(REPO_ROOT / "extractor" / "extract.py"),
+             "--chunk", str(REPO_ROOT / "examples" / "sample_chunk.json"),
+             "--replay", str(REPO_ROOT / "tests" / "fixtures" / "replay_minimal.json"),
+             "--out", str(out), "--log-dir", str(logdir)],
+            capture_output=True, text=True, encoding="utf-8", cwd=str(REPO_ROOT))
+        self.assertEqual(proc.returncode, 0, "replay extraction failed: %s" % proc.stderr)
+        summary = json.loads(proc.stdout)
+        self.assertEqual(summary["counts"]["cards"], 1)
+        self.assertTrue(summary["quote_substring_gate"]["gate_final"]["ok"])
+        self.assertTrue(summary["traceability_gate"]["ok"])
+
+
 class TestStandaloneImport(unittest.TestCase):
     def test_standalone_module_imports_and_agent_constructs(self):
         sys.path.insert(0, str(REPO_ROOT))
