@@ -231,7 +231,8 @@ The answer model is supplied by the host agent/benchmark through an OpenAI-compa
 ├── results/                # Raw benchmark run outputs (multi-hop + single-hop)
 ├── docs/
 │   ├── project-story.md
-│   └── development-cost.md
+│   ├── development-cost.md
+│   └── reproduction.md
 ├── examples/
 │   ├── build_store.py      # Document → memory store
 │   ├── answer.py           # Question → retrieval → answer
