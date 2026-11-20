@@ -81,10 +81,10 @@ All results below use the current system: four-table extraction, supersession/fo
 
 | Task | WhaleYing | Answer model and runs | Reported comparison |
 |---|---:|---|---|
-| Single-hop | **93.2%** | gpt-4o-mini · mean of 5 runs | GPT-4o 60 · BM25 56 · gpt-4o-mini 45 |
+| Single-hop | **93.2%** | gpt-4o-mini · mean of 5 runs (93–94%, std 0.4%) | GPT-4o 60 · BM25 56 · gpt-4o-mini 45 |
 | Single-hop | **93.0%** | DeepSeek, thinking off · 1 run | — |
 | Single-hop | **92.0%** | local Qwen2.5-Coder 7B · 1 run | — |
-| Multi-hop | **48.3%** | DeepSeek, thinking off · mean of 3 runs | BM25 3 · HippoRAG-v2 5 · Mem0 2 · MemGPT 3 · CAR with gpt-4o 41 |
+| Multi-hop | **48.3%** | DeepSeek, thinking off · mean of 3 runs (48–49%, std 0.6%) | BM25 3 · HippoRAG-v2 5 · Mem0 2 · MemGPT 3 · CAR with gpt-4o 41 |
 | Multi-hop | **25.3%** | gpt-4o-mini · mean of 3 runs | — |
 
 ### Memory system vs. direct full-context reading
@@ -97,6 +97,20 @@ All results below use the current system: four-table extraction, supersession/fo
 At 6k context, WhaleYing scored **98% single-hop** and **66% multi-hop substring match** (65% exact), both with DeepSeek and thinking disabled.
 
 The single-hop result remains in the same 92–93% band across a cloud model, DeepSeek, and a local 7B answer model. Multi-hop performance is more dependent on the reasoning ability of the answer model: DeepSeek reached 48.3%, while gpt-4o-mini reached 25.3% under the stated runs. Answer-model temperature was 0.7 for these MemoryAgentBench runs.
+
+### Ablations
+
+The headline gains decompose into a few measured effects:
+
+| Change | Effect (substring exact match) |
+|---|---|
+| Memory system on/off (262k) | Single-hop 64% → 93.2% (+29pp); multi-hop 5.3% → 48.3% (+43pp) |
+| Self-Ask iteration on/off (mh_6k) | 27% → 66% (+39pp) |
+| Answer model (single-hop 262k) | gpt-4o-mini 93.2% ≈ DeepSeek 93.0% ≈ Qwen2.5-Coder 7B 92.0% (model-independent) |
+| Answer model (multi-hop 262k) | DeepSeek 48.3% vs gpt-4o-mini 25.3% (model-dependent) |
+| Folding on/off (LoCoMo) | 38.6% (no folding) vs 36.3% (folding); see LoCoMo below |
+
+The single-hop 93.2% is the mean of five runs (93/93/93/94/93). One additional run was excluded because a mobile-hotspot connection dropped during store extraction and left the memory store incomplete; re-extraction over a stable connection returned the 93–94% band.
 
 Single-hop baselines come from [MemoryAgentBench (arXiv:2507.05257)](https://arxiv.org/abs/2507.05257). Multi-hop baselines and CAR come from [CAR (arXiv:2606.01435)](https://arxiv.org/abs/2606.01435). Raw multi-hop run outputs are included in [`results/`](results/).
 
