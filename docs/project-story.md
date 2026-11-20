@@ -25,7 +25,7 @@
 | 单跳 262k（substring） | **93.0%**（DeepSeek 作答、关思考，单次） | — |
 | 单跳 262k（substring） | **92.0%**（本地 Qwen2.5-Coder 7B 作答，单次） | — |
 | 单跳 6k（substring） | **98%**（DeepSeek 作答、关思考，单次） | — |
-| 多跳 262k（substring） | **48.3%**（DeepSeek 作答、关思考，3 次均值） | 论文多跳全部 ≤6% |
+| 多跳 262k（substring） | **48.3%**（DeepSeek 作答、关思考，3 次均值） | BM25 3% · HippoRAG-v2 5% · Mem0 2% · MemGPT 3% · CAR(gpt-4o) 41% |
 | 多跳 262k（gpt-4o-mini 作答） | **25.3%**（3 次均值） | — |
 | 多跳 262k 纯直接对照 | 5.3%（deepseek 直接读全文，不用记忆） | — 记忆系统 +43pp |
 | 多跳 6k（substring） | **66%**（exact 65%；DeepSeek 作答、关思考，单次） | — |

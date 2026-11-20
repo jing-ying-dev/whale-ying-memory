@@ -16,12 +16,12 @@ The following results are for the current system: four-table extraction, tempora
 | Single-hop, 262k, substring scoring | **93.0%** (DeepSeek answer model, thinking disabled; single run) | — |
 | Single-hop, 262k, substring scoring | **92.0%** (local Qwen2.5-Coder 7B answer model; single run) | — |
 | Single-hop, 6k, substring scoring | **98%** (DeepSeek answer model, thinking disabled; single run) | — |
-| Multi-hop, 262k, substring scoring | **48.3%** (DeepSeek answer model, thinking disabled; mean of 3 runs) | Paper’s multi-hop baselines: ≤6% |
+| Multi-hop, 262k, substring scoring | **48.3%** (DeepSeek answer model, thinking disabled; mean of 3 runs) | Paper’s BM25 3% · HippoRAG-v2 5% · Mem0 2% · MemGPT 3% · CAR (gpt-4o) 41% |
 | Multi-hop, 262k | **25.3%** (gpt-4o-mini answer model; mean of 3 runs) | — |
 | Multi-hop, 262k, direct full-context reading | — | DeepSeek without the memory system: 5.3% |
 | Multi-hop, 6k, substring scoring | **66%** (65% exact; DeepSeek answer model, thinking disabled; single run) | — |
 
-For the reported 262k comparisons, single-hop performance rose from 64% direct to 93.2% with memory; multi-hop rose from 5.3% direct to 48.3% with memory. Single-hop accuracy is stable across answer models — gpt-4o-mini (93.2%), DeepSeek with thinking disabled (93.0%), and a local Qwen2.5-Coder 7B (92.0%) all land in the same band. These are benchmark results under the stated configurations, not a guarantee of performance on other workloads. Answer-model temperature was 0.7 for all runs.
+For the reported 262k comparisons, single-hop performance rose from 64% direct to 93.2% with memory; multi-hop rose from 5.3% direct to 48.3% with memory. Single-hop accuracy is stable across answer models — gpt-4o-mini (93.2%), DeepSeek with thinking disabled (93.0%), and a local Qwen2.5-Coder 7B (92.0%) all land in the same band. These are benchmark results under the stated configurations, not a guarantee of performance on other workloads. Answer-model temperature was 0.7 for all runs. Single-hop baselines are from MemoryAgentBench (arXiv 2507.05257); the 262k multi-hop baselines (BM25, HippoRAG-v2, Mem0, MemGPT) and CAR are as reported in arXiv 2606.01435.
 
 ## How it works
 
