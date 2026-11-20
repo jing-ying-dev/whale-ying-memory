@@ -1,4 +1,4 @@
-# WhaleYing
+# WhaleYing Memory
 
 **Structured long-term memory for AI agents, built on DeepSeek — with conflict resolution and multi-hop retrieval.**
 

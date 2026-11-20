@@ -1,10 +1,10 @@
-# WhaleYing · 项目故事
+# WhaleYing Memory · 项目故事
 
 > 口径：以下分数都是**当前这套记忆系统**（抽取器四表 + bi-temporal/supersession 折叠 + 混合检索 + Self-Ask 多跳迭代）测得的。迭代早期的分数一律不计。
 
 ## 一、项目与作者
 
-- **项目名**：WhaleYing（Whale = DeepSeek 的鲸鱼 logo、也是「深海记忆」的意象；Ying = 作者名「英」）。
+- **项目名**：WhaleYing Memory（Whale = DeepSeek 的鲸鱼 logo、也是「深海记忆」的意象；Ying = 作者名「英」）。
 - **作者**：21 岁，一本中医学大三学生，**非计算机/AI 专业背景**。
 - **时间线**：
   - 2026-10-14 开始研究 API；
