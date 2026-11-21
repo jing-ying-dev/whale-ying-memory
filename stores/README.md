@@ -25,14 +25,13 @@ with this attribution.
 
 ## Extraction and retrieval figures (including timing)
 
-- **Extraction** (both stores use DeepSeek-flash, `disable_thinking=True`):
-  - single-hop store: 67 chunks, 18,124 rows. Re-extracted 2026-11-21 for timing:
-    ~84 minutes end-to-end (serial, ~75 s/chunk). An earlier journal note
-    ("reuse saves 86 minutes") matches this serial figure.
-  - multi-hop store: 67 chunks → 870 pieces, 8-way concurrent extraction,
-    ~11.5 minutes (recorded 2026-11-20, see journal `1120-2`).
-  - The single-hop vs multi-hop timing gap is **serial vs 8-way concurrent**
-    extraction, not the thinking toggle (both disable thinking).
+- **Extraction** (both stores use DeepSeek-flash, `disable_thinking=True`,
+  8-way concurrent, 67 chunks each):
+  - single-hop store: 18,124 rows; re-extracted 2026-11-21 for timing —
+    wall-clock **~11.5 minutes** (matches the multi-hop store).
+  - multi-hop store: 17,904 rows; ~11.5 minutes (recorded 2026-11-20, journal `1120-2`).
+  - The two stores are extracted under the same configuration (same concurrency,
+    same thinking-off setting).
 - **Answering** (gpt-4o-mini or DeepSeek, temperature 0.7):
   - 100 single-hop questions: ~4 minutes.
   - 100 multi-hop questions: ~15–25 minutes (Self-Ask iteration).
