@@ -35,7 +35,27 @@ adapter in `memory/whale_ying.py` as the reference integration point.
 `handle_our_agent(...)`. The benchmark's `agent.py` must be pointed at these hooks, and
 the agent config must select the "our_system" agent type.
 
-The two configuration files used for the published runs are equivalent to:
+#### Configuration parity with the published baselines
+
+The published comparison follows MemoryAgentBench's own test setup. The dataset
+configuration is the official `Factconsolidation_sh_262k.yaml` / `Factconsolidation_mh_262k.yaml`
+unchanged, and the agent configuration copies the baseline values so WhaleYing sits on
+the same terms as the reported baselines:
+
+| Field | Published baselines (BM25 / gpt-4o) | WhaleYing (our runs) | Match |
+|---|---|---|---|
+| dataset | Conflict_Resolution | Conflict_Resolution | ✓ |
+| chunk_size | 4096 | 4096 | ✓ |
+| seed | 42 | 42 | ✓ |
+| context_max_length | 300000 | 300000 | ✓ |
+| max_test_samples | 1 | 1 | ✓ |
+| shots | 0 | 0 | ✓ |
+| temperature | 0.7 | 0.7 | ✓ |
+| retrieve_num | 10 (BM25 and other RAG baselines) | 10 | ✓ |
+| metric | substring exact match | substring exact match | ✓ |
+
+The only deliberate difference is the memory system itself (extraction + folding +
+hybrid retrieval vs. the baselines' full-context reading or plain BM25).
 
 ```yaml
 # agent config (answer model gpt-4o-mini, temperature 0.7)

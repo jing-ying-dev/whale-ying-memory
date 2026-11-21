@@ -81,6 +81,8 @@ For implementation details and terminology, see [ARCHITECTURE.md](ARCHITECTURE.m
 
 All results below use the current system: four-table extraction, supersession/folding, hybrid retrieval, and optional Self-Ask iteration. The metric is **substring exact match** on **MemoryAgentBench · Conflict_Resolution**.
 
+**Prebuilt stores are shipped in [`stores/`](stores/)** — load them and run retrieval + answering directly, without re-running the expensive extraction stage. The stores' facts are extracted from the MemoryAgentBench dataset (MIT License, © 2026 Yuanzhe Hu); see [`stores/README.md`](stores/README.md) for provenance and extraction/retrieval timing.
+
 ### 262k context
 
 | Task | WhaleYing | Answer model and runs | Reported comparison |
@@ -116,7 +118,7 @@ The headline gains decompose into a few measured effects:
 
 Thinking mode was ablated on DeepSeek 262k single-hop. With reranking and answering thinking disabled, disabling extraction thinking as well measured 90.0% on the first run and 92% on a re-test, versus 93.0% with extraction thinking on — a −1~3pp swing inside the temperature-0.7 single-run noise band, so thinking mode was not a measurable contributor at these settings. The single-hop 93.2% headline (gpt-4o-mini) was measured with extraction thinking on; the current extractor disables thinking, and re-tests put the difference inside noise.
 
-The single-hop 93.2% is the mean of five runs (93/93/93/94/93). One additional run was excluded because a mobile-hotspot connection dropped during store extraction and left the memory store incomplete; re-extraction over a stable connection returned the 93–94% band.
+The single-hop 93.2% is the mean of five runs (93/93/93/94/93). One additional run (86%) was excluded because a mobile-hotspot connection dropped during store extraction and left the memory store incomplete; that run's raw output is still shipped in [`results/singlehop-262k/`](results/singlehop-262k/) for inspection, and re-extraction over a stable connection returned the 93–94% band.
 
 Single-hop baselines come from [MemoryAgentBench (arXiv:2507.05257)](https://arxiv.org/abs/2507.05257). Multi-hop baselines and CAR come from [CAR (arXiv:2606.01435)](https://arxiv.org/abs/2606.01435). Raw multi-hop and single-hop run outputs are included in [`results/`](results/) (see [`results/README.md`](results/README.md) for the verified numbers and provenance).
 

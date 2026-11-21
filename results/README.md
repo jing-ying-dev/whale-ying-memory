@@ -8,7 +8,7 @@ Raw benchmark run outputs backing the README numbers. Every score below is
 ```
 results/
 ├── multihop-262k/        # 3 runs × {deepseek, gpt-4o-mini, direct full-context}
-├── singlehop-262k/       # 5 runs (gpt-4o-mini answer model)
+├── singlehop-262k/       # 6 runs (gpt-4o-mini answer model; one excluded, see below)
 └── README.md
 ```
 
@@ -24,13 +24,14 @@ results/
 
 ### Single-hop 262k (`singlehop-262k/`)
 
-Five runs with the gpt-4o-mini answer model: 93 / 93 / 93 / 94 / 93 →
-**93.2% mean** (exact match mean 91.0%).
+Six runs with the gpt-4o-mini answer model: 93 / 86 / 93 / 93 / 94 / 93.
+The **93.2% mean** is over the five valid runs (93 / 93 / 93 / 94 / 93;
+exact match mean 91.0%).
 
-One additional run (86%) was excluded because a mobile-hotspot connection
-dropped during store extraction and left the memory store incomplete; the file is
-not included here. Re-extraction over a stable connection returned the 93–94% band
-(see the README for the full note).
+The 86% run (`gpt_v3_r2.json`) is **included here for inspection** but excluded
+from the mean: a mobile-hotspot connection dropped during store extraction and
+left the memory store incomplete. Re-extraction over a stable connection
+returned the 93–94% band (see the README for the full note).
 
 ## How to read a result file
 
